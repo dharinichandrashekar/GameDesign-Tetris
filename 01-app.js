@@ -1,311 +1,450 @@
+"use strict";
+
 document.addEventListener("DOMContentLoaded", () => {
-  const grid = document.querySelector(".grid");
-  let squares = Array.from(document.querySelectorAll(".grid div"));
+  const WIDTH = 10;
+  const HEIGHT = 20;
+  const LOCK_DELAY_MS = 500;
+  const MAX_LOCK_RESETS = 15;
+  const DAS_MS = 170;
+  const ARR_MS = 50;
+  const PIECE_NAMES = ["L", "J", "O", "I", "T", "S", "Z"];
+  const STATUS_LABELS = { ready: "Ready", playing: "Playing", paused: "Paused", over: "Game over" };
+  const COLORS = ["#ff9f1c", "#287de1", "#ffd500", "#00c8df", "#a453d8", "#44c36d", "#e54a4a"];
+  // Tetromino indices: L, J, O, I, T, S, Z.
+
+  const grid = document.querySelector("#game-grid");
+  const nextGrid = document.querySelector("#next-grid");
+  const holdGrid = document.querySelector("#hold-grid");
   const scoreDisplay = document.querySelector("#score");
   const linesDisplay = document.querySelector("#lines");
   const levelDisplay = document.querySelector("#level");
   const piecesDisplay = document.querySelector("#pieces");
   const timeDisplay = document.querySelector("#time");
   const statusDisplay = document.querySelector("#status");
-  const startBtn = document.querySelector("#start-button");
-  const resetBtn = document.querySelector("#reset-button");
-  const width = 10;
-  const height = 20;
-  const params = new URLSearchParams(window.location.search);
-  const experiment = {
-    trialId: params.get("trial") || "unlabeled",
-    seed: Number.isFinite(Number(params.get("seed"))) && params.has("seed")
-      ? (Number(params.get("seed")) >>> 0)
-      : 12345,
-    durationSeconds: Math.max(0, Number(params.get("duration")) || 0),
-    gravityMs: 1000,
-    progressiveSpeed: params.get("progression") === "1", // Default fixed for study; ?progression=1 accelerates.
-    lockDelayMs: 500,
-    maxLockResets: 15,
-    enableHold: true,
-    enableGhost: true,
-    allowPause: params.get("pause") !== "0", // ?pause=0 prevents pausing in a study.
-    delayedAutoShiftMs: 170, // fixed keyboard repeat timing across computers
-    autoRepeatMs: 50,
-  };
+  const statusPanel = document.querySelector("#status-panel");
+  const startButton = document.querySelector("#start-button");
+  const resetButton = document.querySelector("#reset-button");
+  const exportButton = document.querySelector("#export-button");
+  const playerIdInput = document.querySelector("#player-id");
+  const exportFeedback = document.querySelector("#export-feedback");
 
-  let timerId = null;
-  let clockId = null;
-  let lockTimerId = null;
-  let status = "idle"; // idle, running, paused, finished
-  let finishReason = null;
-  let score = 0;
-  let lines = 0;
-  let level = 1;
-  let piecesPlaced = 0;
-  let lockResets = 0;
-  let heldPiece = null;
-  let holdUsed = false;
-  let activeElapsedMs = 0;
-  let sessionStart = 0;
-  let randomState = experiment.seed;
-  let bag = [];
-  let log = [];
-  const heldKeys = new Map();
-  const colors = ["#ff9f1c", "#287de1", "#ffd500", "#00c8df", "#a453d8", "#44c36d", "#e54a4a"];
-  // Shape order: L, J, O, I, T, S, Z (one fixed color per shape).
-  const pieceNames = ["L", "J", "O", "I", "T", "S", "Z"];
+  if (!window.crypto || typeof window.crypto.getRandomValues !== "function") {
+    statusDisplay.textContent = "Browser unsupported";
+    startButton.disabled = true;
+    resetButton.disabled = true;
+    exportButton.disabled = true;
+    return;
+  }
 
-  function createRotations(cells, size) {
+  function createCells(container, count) {
+    const nodes = Array.from({ length: count }, () => {
+      const cell = document.createElement("div");
+      cell.className = "cell";
+      return cell;
+    });
+    container.replaceChildren(...nodes);
+    return nodes;
+  }
+  const squares = createCells(grid, WIDTH * HEIGHT);
+  const nextSquares = createCells(nextGrid, 16);
+  const holdSquares = createCells(holdGrid, 16);
+
+  // Rotations use the 3x3 (or 4x4 for I) guideline rotation boxes.
+  function makeRotations(cells, size) {
     const rotations = [];
     let points = cells.map(([x, y]) => [x, y]);
     for (let r = 0; r < 4; r++) {
-      rotations.push(points.map(([x, y]) => y * width + x));
+      rotations.push(points.map(([x, y]) => ({ x, y })));
       if (size !== 2) points = points.map(([x, y]) => [size - 1 - y, x]);
     }
     return rotations;
   }
 
-  // The seven Tetrominoes, in their modern spawn orientations.
-  const lTetromino = createRotations([[2, 0], [0, 1], [1, 1], [2, 1]], 3);
-  const jTetromino = createRotations([[0, 0], [0, 1], [1, 1], [2, 1]], 3);
-  const oTetromino = createRotations([[0, 0], [1, 0], [0, 1], [1, 1]], 2);
-  const iTetromino = createRotations([[0, 1], [1, 1], [2, 1], [3, 1]], 4);
-  const tTetromino = createRotations([[1, 0], [0, 1], [1, 1], [2, 1]], 3);
-  const sTetromino = createRotations([[1, 0], [2, 0], [0, 1], [1, 1]], 3);
-  const zTetromino = createRotations([[0, 0], [1, 0], [1, 1], [2, 1]], 3);
-  const theTetrominoes = [lTetromino, jTetromino, oTetromino, iTetromino, tTetromino, sTetromino, zTetromino];
+  const SHAPES = [
+    makeRotations([[2, 0], [0, 1], [1, 1], [2, 1]], 3), // L
+    makeRotations([[0, 0], [0, 1], [1, 1], [2, 1]], 3), // J
+    makeRotations([[0, 0], [1, 0], [0, 1], [1, 1]], 2), // O
+    makeRotations([[0, 1], [1, 1], [2, 1], [3, 1]], 4), // I
+    makeRotations([[1, 0], [0, 1], [1, 1], [2, 1]], 3), // T
+    makeRotations([[1, 0], [2, 0], [0, 1], [1, 1]], 3), // S
+    makeRotations([[0, 0], [1, 0], [1, 1], [2, 1]], 3), // Z
+  ];
 
-  // SRS kick data. Each pair is (columns right, rows UP), matching TetrisWiki.
-  const standardKicks = {
-    "0>1": [[0,0],[-1,0],[-1,1],[0,-2],[-1,-2]],
-    "1>0": [[0,0],[1,0],[1,-1],[0,2],[1,2]],
-    "1>2": [[0,0],[1,0],[1,-1],[0,2],[1,2]],
-    "2>1": [[0,0],[-1,0],[-1,1],[0,-2],[-1,-2]],
-    "2>3": [[0,0],[1,0],[1,1],[0,-2],[1,-2]],
-    "3>2": [[0,0],[-1,0],[-1,-1],[0,2],[-1,2]],
-    "3>0": [[0,0],[-1,0],[-1,-1],[0,2],[-1,2]],
-    "0>3": [[0,0],[1,0],[1,1],[0,-2],[1,-2]],
+  // SRS kicks: [horizontal offset, upward offset].
+  const KICKS = {
+    "0>1": [[0, 0], [-1, 0], [-1, 1], [0, -2], [-1, -2]],
+    "1>0": [[0, 0], [1, 0], [1, -1], [0, 2], [1, 2]],
+    "1>2": [[0, 0], [1, 0], [1, -1], [0, 2], [1, 2]],
+    "2>1": [[0, 0], [-1, 0], [-1, 1], [0, -2], [-1, -2]],
+    "2>3": [[0, 0], [1, 0], [1, 1], [0, -2], [1, -2]],
+    "3>2": [[0, 0], [-1, 0], [-1, -1], [0, 2], [-1, 2]],
+    "3>0": [[0, 0], [-1, 0], [-1, -1], [0, 2], [-1, 2]],
+    "0>3": [[0, 0], [1, 0], [1, 1], [0, -2], [1, -2]],
   };
-  const iKicks = {
-    "0>1": [[0,0],[-2,0],[1,0],[-2,-1],[1,2]],
-    "1>0": [[0,0],[2,0],[-1,0],[2,1],[-1,-2]],
-    "1>2": [[0,0],[-1,0],[2,0],[-1,2],[2,-1]],
-    "2>1": [[0,0],[1,0],[-2,0],[1,-2],[-2,1]],
-    "2>3": [[0,0],[2,0],[-1,0],[2,1],[-1,-2]],
-    "3>2": [[0,0],[-2,0],[1,0],[-2,-1],[1,2]],
-    "3>0": [[0,0],[1,0],[-2,0],[1,-2],[-2,1]],
-    "0>3": [[0,0],[-1,0],[2,0],[-1,2],[2,-1]],
+  const I_KICKS = {
+    "0>1": [[0, 0], [-2, 0], [1, 0], [-2, -1], [1, 2]],
+    "1>0": [[0, 0], [2, 0], [-1, 0], [2, 1], [-1, -2]],
+    "1>2": [[0, 0], [-1, 0], [2, 0], [-1, 2], [2, -1]],
+    "2>1": [[0, 0], [1, 0], [-2, 0], [1, -2], [-2, 1]],
+    "2>3": [[0, 0], [2, 0], [-1, 0], [2, 1], [-1, -2]],
+    "3>2": [[0, 0], [-2, 0], [1, 0], [-2, -1], [1, 2]],
+    "3>0": [[0, 0], [1, 0], [-2, 0], [1, -2], [-2, 1]],
+    "0>3": [[0, 0], [-1, 0], [2, 0], [-1, 2], [2, -1]],
   };
 
-  let currentPosition = { x: 3, y: 0 };
-  let currentRotation = 0;
-  let random = 0;
-  let nextRandom = 0;
-  let current = theTetrominoes[random][currentRotation];
+  let board;
+  let piece;
+  let nextType;
+  let heldType;
+  let holdUsed;
+  let bag;
+  let score;
+  let lines;
+  let level;
+  let piecesPlaced;
+  let state;
+  let gravityTimer = null;
+  let displayTimer = null;
+  let lockTimer = null;
+  let lockResets = 0;
+  let elapsedBeforePause = 0;
+  let runningSince = 0;
+  const heldKeys = new Map();
+  // This log stays in memory only and is preserved across resets in this tab.
+  // It records game status and statistics, not individual key presses.
+  const gameLog = [];
+  let gameNumber = 0;
+  let hasStarted = false;
+  let lastSnapshotSecond = 0;
 
-  function rand() {
-    // Mulberry32: a compact reproducible PRNG with good seed diffusion.
-    randomState = (randomState + 0x6D2B79F5) >>> 0;
-    let n = randomState;
-    n = Math.imul(n ^ (n >>> 15), n | 1);
-    n ^= n + Math.imul(n ^ (n >>> 7), n | 61);
-    return ((n ^ (n >>> 14)) >>> 0) / 4294967296;
+  function formatElapsedTime(milliseconds) {
+    const totalSeconds = Math.floor(Math.max(0, milliseconds) / 1000);
+    return `${String(Math.floor(totalSeconds / 60)).padStart(2, "0")}:${String(totalSeconds % 60).padStart(2, "0")}`;
   }
 
-  // Seven-bag randomizer: all seven pieces before reshuffling.
+  function logEvent(event, details = "") {
+    const ms = elapsedMs();
+    gameLog.push({
+      game: gameNumber,
+      timestamp_utc: new Date().toISOString(),
+      event,
+      status: STATUS_LABELS[state],
+      elapsed_mm_ss: formatElapsedTime(ms),
+      elapsed_seconds: (ms / 1000).toFixed(2),
+      score,
+      lines,
+      level,
+      pieces_placed: piecesPlaced,
+      current_piece: piece === null ? "" : PIECE_NAMES[piece.type],
+      next_piece: PIECE_NAMES[nextType],
+      held_piece: heldType === null ? "" : PIECE_NAMES[heldType],
+      details,
+    });
+    if (event === "started") hasStarted = true;
+    exportButton.disabled = !hasStarted;
+  }
+
+  function exportGameLog() {
+    if (!hasStarted) return;
+    const id = playerIdInput.value.trim();
+    if (!id) {
+      exportFeedback.textContent = "Enter an ID before exporting the game log.";
+      playerIdInput.focus();
+      return;
+    }
+    // Keep the exact entered ID in the CSV; normalize only the filename.
+    const safeId = id.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
+    if (!safeId) {
+      exportFeedback.textContent = "Use an ID containing at least one letter or number (A-Z, 0-9).";
+      playerIdInput.focus();
+      return;
+    }
+    exportFeedback.textContent = "";
+    logEvent("log_exported");
+    const columns = [
+      ["ID", "id"], ["Game", "game"], ["Timestamp (UTC)", "timestamp_utc"],
+      ["Event", "event"], ["Status", "status"],
+      ["Elapsed (MM:SS)", "elapsed_mm_ss"], ["Elapsed (seconds)", "elapsed_seconds"],
+      ["Score", "score"], ["Lines", "lines"], ["Level", "level"],
+      ["Pieces placed", "pieces_placed"], ["Current piece", "current_piece"],
+      ["Next piece", "next_piece"], ["Held piece", "held_piece"],
+      ["Details", "details"],
+    ];
+    // Guard spreadsheet viewers against interpreting a user-entered ID as a formula.
+    const csvCell = (value) => {
+      const plain = String(value ?? "");
+      const safe = /^[\s]*[=+\-@]/.test(plain) ? `'${plain}` : plain;
+      return `"${safe.replaceAll('"', '""')}"`;
+    };
+    const csv = [columns.map(([name]) => csvCell(name)).join(","),
+      ...gameLog.map((row) => columns.map(([, key]) => csvCell(key === "id" ? id : row[key])).join(","))
+    ].join("\r\n");
+    const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    // Local date and time, with filename-safe separators (YYYY-MM-DD_HH-mm-ss).
+    const now = new Date();
+    const pad2 = (n) => String(n).padStart(2, "0");
+    const date = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+    const time = `${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}`;
+    link.download = `Tetris_game_log_${date}_${time}_${safeId}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // Use unbiased, browser-provided cryptographic randomness for every shuffle.
+  // The seven-bag constraint prevents droughts, but the next type is still
+  // inferable when only one type remains in the current bag.
+  function randomInt(maxExclusive) {
+    const domain = 0x100000000;
+    const upperBound = domain - (domain % maxExclusive);
+    const value = new Uint32Array(1);
+    do {
+      window.crypto.getRandomValues(value);
+    } while (value[0] >= upperBound);
+    return value[0] % maxExclusive;
+  }
+
   function takePiece() {
-    if (!bag.length) {
-      bag = Array.from({ length: theTetrominoes.length }, (_, i) => i);
+    if (bag.length === 0) {
+      bag = Array.from({ length: SHAPES.length }, (_, i) => i);
       for (let i = bag.length - 1; i > 0; i--) {
-        const j = Math.floor(rand() * (i + 1));
+        const j = randomInt(i + 1);
         [bag[i], bag[j]] = [bag[j], bag[i]];
       }
     }
     return bag.pop();
   }
 
-  function getCells(type = random, rotation = currentRotation, position = currentPosition) {
-    return theTetrominoes[type][rotation].map((offset) => {
-      const x = position.x + offset % width;
-      const y = position.y + Math.floor(offset / width);
-      return { x, y, index: y * width + x };
-    });
+  function newPiece(type) {
+    return { type, rotation: 0, x: type === 2 ? 4 : 3, y: 0 };
   }
 
-  function canPlace(position, rotation = currentRotation, type = random) {
-    return getCells(type, rotation, position).every(({ x, y, index }) =>
-      x >= 0 && x < width && y >= 0 && y < height &&
-      !squares[index].classList.contains("taken")
+  function cellsFor(candidate) {
+    return SHAPES[candidate.type][candidate.rotation].map(({ x, y }) => ({
+      x: candidate.x + x,
+      y: candidate.y + y,
+    }));
+  }
+
+  function canPlace(candidate) {
+    return cellsFor(candidate).every(({ x, y }) =>
+      x >= 0 && x < WIDTH && y >= 0 && y < HEIGHT && board[y][x] === null
     );
   }
 
-  // Draw the ghost underneath the active Tetromino.
-  function draw() {
-    if (experiment.enableGhost) {
-      let ghostPosition = { ...currentPosition };
-      while (canPlace({ ...ghostPosition, y: ghostPosition.y + 1 })) ghostPosition.y++;
-      const occupied = new Set(getCells().map(({ index }) => index));
-      getCells(random, currentRotation, ghostPosition).forEach(({ index }) => {
-        if (!occupied.has(index)) squares[index].classList.add("ghost");
-      });
-    }
-    getCells().forEach(({ index }) => {
-      squares[index].classList.add("tetromino");
-      squares[index].style.backgroundColor = colors[random];
+  function isGrounded() {
+    return piece !== null && !canPlace({ ...piece, y: piece.y + 1 });
+  }
+
+  function paintPreview(squaresToPaint, type) {
+    squaresToPaint.forEach((square) => {
+      square.className = "cell";
+      square.style.backgroundColor = "";
+    });
+    if (type === null) return;
+    SHAPES[type][0].forEach(({ x, y }) => {
+      const square = squaresToPaint[y * 4 + x];
+      square.classList.add("filled");
+      square.style.backgroundColor = COLORS[type];
     });
   }
 
-  function undraw() {
-    squares.forEach((square) => square.classList.remove("ghost"));
-    getCells().forEach(({ index }) => {
-      if (squares[index]) {
-        squares[index].classList.remove("tetromino");
-        squares[index].style.backgroundColor = "";
+  function render() {
+    for (let y = 0; y < HEIGHT; y++) {
+      for (let x = 0; x < WIDTH; x++) {
+        const square = squares[y * WIDTH + x];
+        const type = board[y][x];
+        square.className = type === null ? "cell" : "cell filled locked";
+        square.style.backgroundColor = type === null ? "" : COLORS[type];
       }
-    });
+    }
+
+    if (piece !== null && state !== "ready") {
+      const ghost = { ...piece };
+      while (canPlace({ ...ghost, y: ghost.y + 1 })) ghost.y++;
+      const occupied = new Set(cellsFor(piece).map(({ x, y }) => y * WIDTH + x));
+      cellsFor(ghost).forEach(({ x, y }) => {
+        const index = y * WIDTH + x;
+        if (!occupied.has(index)) squares[index].classList.add("ghost");
+      });
+      cellsFor(piece).forEach(({ x, y }) => {
+        const square = squares[y * WIDTH + x];
+        square.classList.add("filled", "active");
+        square.style.backgroundColor = COLORS[piece.type];
+      });
+    }
+
+    paintPreview(nextSquares, nextType);
+    paintPreview(holdSquares, heldType);
+    holdGrid.classList.toggle("used", holdUsed);
   }
 
   function elapsedMs() {
-    return activeElapsedMs + (status === "running" ? performance.now() - sessionStart : 0);
-  }
-
-  function record(event, detail = "") {
-    log.push({
-      trial: experiment.trialId,
-      seed: experiment.seed,
-      timestamp_utc: new Date().toISOString(),
-      gravity_ms: experiment.gravityMs,
-      lock_delay_ms: experiment.lockDelayMs,
-      duration_seconds: experiment.durationSeconds,
-      progressive_speed: experiment.progressiveSpeed,
-      pause_allowed: experiment.allowPause,
-      elapsed_ms: Math.round(elapsedMs()),
-      event,
-      piece: pieceNames[random],
-      x: currentPosition.x,
-      y: currentPosition.y,
-      rotation: currentRotation,
-      score,
-      lines,
-      level,
-      pieces_placed: piecesPlaced,
-      detail,
-    });
+    return elapsedBeforePause + (state === "playing" ? performance.now() - runningSince : 0);
   }
 
   function updateDisplay() {
-    scoreDisplay.textContent = score;
-    linesDisplay.textContent = lines;
-    levelDisplay.textContent = level;
-    piecesDisplay.textContent = piecesPlaced;
-    timeDisplay.textContent = (elapsedMs() / 1000).toFixed(1) + "s";
-    statusDisplay.textContent = {
-      idle: "Ready",
-      running: "Playing",
-      paused: "Paused",
-      finished: "Game over",
-    }[status];
-    startBtn.textContent = { idle: "Start", running: "Pause", paused: "Resume", finished: "New game" }[status];
-    startBtn.disabled = status === "running" && !experiment.allowPause;
-    statusDisplay.dataset.state = status;
-    statusDisplay.setAttribute("aria-label", `Game status: ${statusDisplay.textContent}`);
-    const statusButton = document.querySelector(".status");
-    statusButton.dataset.state = status;
+    scoreDisplay.textContent = score.toLocaleString();
+    linesDisplay.textContent = String(lines);
+    levelDisplay.textContent = String(level);
+    piecesDisplay.textContent = String(piecesPlaced);
+    timeDisplay.textContent = formatElapsedTime(elapsedMs());
+    statusDisplay.textContent = STATUS_LABELS[state];
+    statusPanel.dataset.state = state;
+    startButton.textContent = {
+      ready: "Start",
+      playing: "Pause",
+      paused: "Resume",
+      over: "New game",
+    }[state];
   }
 
   function clearLockTimer() {
-    if (lockTimerId !== null) clearTimeout(lockTimerId);
-    lockTimerId = null;
+    if (lockTimer !== null) clearTimeout(lockTimer);
+    lockTimer = null;
   }
 
   function updateLockTimer(playerMoved = false) {
-    if (canPlace({ ...currentPosition, y: currentPosition.y + 1 })) {
+    if (state !== "playing" || piece === null) return;
+    if (!isGrounded()) {
       clearLockTimer();
       return;
     }
-    if (lockTimerId !== null && (!playerMoved || lockResets >= experiment.maxLockResets)) return;
-    if (lockTimerId !== null) {
+    if (lockTimer !== null) {
+      if (!playerMoved || lockResets >= MAX_LOCK_RESETS) return;
       clearLockTimer();
       lockResets++;
     }
-    lockTimerId = setTimeout(() => {
-      lockTimerId = null;
-      if (status === "running") freeze(true);
-    }, experiment.lockDelayMs);
+    lockTimer = setTimeout(() => {
+      lockTimer = null;
+      if (state === "playing" && isGrounded()) lockPiece();
+    }, LOCK_DELAY_MS);
   }
 
-  // Fixed key-repeat timing (DAS/ARR), rather than OS-specific keyboard repeats.
-  function stopRepeating(code) {
-    const repeat = heldKeys.get(code);
-    if (!repeat) return;
-    clearTimeout(repeat.delayId);
-    clearInterval(repeat.intervalId);
+  function stopKeyRepeat(code) {
+    const key = heldKeys.get(code);
+    if (!key) return;
+    clearTimeout(key.delay);
+    clearInterval(key.interval);
     heldKeys.delete(code);
   }
 
-  function stopAllRepeating() {
-    for (const code of [...heldKeys.keys()]) stopRepeating(code);
+  function stopAllKeyRepeats() {
+    for (const code of [...heldKeys.keys()]) stopKeyRepeat(code);
   }
 
-  function beginRepeating(code, action) {
+  function startKeyRepeat(code, action) {
     if (heldKeys.has(code)) return;
     action();
-    const repeat = { delayId: null, intervalId: null };
-    heldKeys.set(code, repeat);
-    repeat.delayId = setTimeout(() => {
-      if (status !== "running") return;
+    const key = { delay: null, interval: null };
+    heldKeys.set(code, key);
+    key.delay = setTimeout(() => {
+      if (state !== "playing" || !heldKeys.has(code)) return;
       action();
-      repeat.intervalId = setInterval(() => {
-        if (status === "running") action();
-      }, experiment.autoRepeatMs);
-    }, experiment.delayedAutoShiftMs);
+      key.interval = setInterval(() => {
+        if (state === "playing") action();
+      }, ARR_MS);
+    }, DAS_MS);
   }
 
-  function control(e) {
-    const keys = ["ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp", "KeyX", "KeyZ", "Space", "KeyC", "ShiftLeft", "ShiftRight", "KeyP"];
-    if (keys.includes(e.code)) e.preventDefault();
-    if (e.code === "KeyP" && !e.repeat && experiment.allowPause && status !== "finished" && status !== "idle") {
-      toggleStartPause();
-      return;
-    }
-    if (status !== "running") return;
-    if (["ArrowLeft", "ArrowRight", "ArrowDown"].includes(e.code)) {
-      if (e.repeat) return;
-      // The most recently pressed horizontal direction takes precedence.
-      if (e.code === "ArrowLeft") {
-        stopRepeating("ArrowRight");
-        beginRepeating(e.code, moveLeft);
-      } else if (e.code === "ArrowRight") {
-        stopRepeating("ArrowLeft");
-        beginRepeating(e.code, moveRight);
-      } else beginRepeating(e.code, () => moveDown(true));
-      return;
-    }
-    if (e.repeat) return;
-    if (e.code === "ArrowUp" || e.code === "KeyX") rotate(1);
-    else if (e.code === "KeyZ") rotate(-1);
-    else if (e.code === "Space") hardDrop();
-    else if (e.code === "KeyC" || e.code === "ShiftLeft" || e.code === "ShiftRight") hold();
+  function stopTimers() {
+    clearInterval(gravityTimer);
+    clearInterval(displayTimer);
+    gravityTimer = null;
+    displayTimer = null;
+    clearLockTimer();
+    stopAllKeyRepeats();
   }
-  document.addEventListener("keydown", control);
-  document.addEventListener("keyup", (e) => stopRepeating(e.code));
-  window.addEventListener("blur", () => {
-    stopAllRepeating();
-    if (status === "running") record("focus_lost");
-  });
-  window.addEventListener("focus", () => {
-    if (status === "running") record("focus_returned");
-  });
-  document.addEventListener("visibilitychange", () => {
-    if (status === "running") record(document.hidden ? "tab_hidden" : "tab_visible");
-  });
 
-  // Move down once for gravity, or award soft-drop points for a manual move.
-  function moveDown(softDrop = false) {
-    if (status !== "running") return;
-    const candidate = { ...currentPosition, y: currentPosition.y + 1 };
+  function gravityMs() {
+    return Math.max(80, Math.round(1000 * Math.pow(0.8, level - 1)));
+  }
+
+  function restartGravity() {
+    clearInterval(gravityTimer);
+    if (state === "playing") gravityTimer = setInterval(() => moveDown(false), gravityMs());
+  }
+
+  function startTimers() {
+    runningSince = performance.now();
+    restartGravity();
+    displayTimer = setInterval(() => {
+      updateDisplay();
+      const currentSecond = Math.floor(elapsedMs() / 1000);
+      if (state === "playing" && currentSecond > lastSnapshotSecond) {
+        lastSnapshotSecond = currentSecond;
+        logEvent("snapshot");
+      }
+    }, 100);
+    updateLockTimer();
+  }
+
+  function endGame(reason = "New piece could not spawn") {
+    if (state !== "playing") return;
+    elapsedBeforePause = elapsedMs();
+    state = "over";
+    stopTimers();
+    render();
+    updateDisplay();
+    logEvent("game_over", reason);
+  }
+
+  function spawnNext() {
+    piece = newPiece(nextType);
+    nextType = takePiece();
+    holdUsed = false;
+    lockResets = 0;
+    if (!canPlace(piece)) {
+      piece = null;
+      endGame();
+      return;
+    }
+    render();
+    updateLockTimer();
+  }
+
+  function lockPiece() {
+    if (state !== "playing" || piece === null) return;
+    clearLockTimer();
+    const lockedType = piece.type;
+    cellsFor(piece).forEach(({ x, y }) => { board[y][x] = piece.type; });
+    piecesPlaced++;
+    piece = null;
+    logEvent("piece_locked", PIECE_NAMES[lockedType]);
+
+    // Work on the logical board. Rows cannot be confused with the grid's DOM nodes.
+    const keptRows = board.filter((row) => row.some((type) => type === null));
+    const cleared = HEIGHT - keptRows.length;
+    board = [
+      ...Array.from({ length: cleared }, () => Array(WIDTH).fill(null)),
+      ...keptRows,
+    ];
+    if (cleared) {
+      score += [0, 100, 300, 500, 800][cleared] * level;
+      lines += cleared;
+      logEvent("lines_cleared", String(cleared));
+      const newLevel = Math.floor(lines / 10) + 1;
+      if (newLevel !== level) {
+        level = newLevel;
+        restartGravity();
+        logEvent("level_up", String(level));
+      }
+    }
+    spawnNext();
+    updateDisplay();
+  }
+
+  function moveDown(isSoftDrop) {
+    if (state !== "playing" || piece === null) return;
+    const candidate = { ...piece, y: piece.y + 1 };
     if (canPlace(candidate)) {
-      undraw();
-      currentPosition = candidate;
-      if (softDrop) score += 1;
-      draw();
-      if (softDrop) record("soft_drop");
+      piece = candidate;
+      if (isSoftDrop) score++;
+      render();
       updateLockTimer();
       updateDisplay();
     } else {
@@ -313,284 +452,173 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  function moveHorizontal(dx) {
+    if (state !== "playing" || piece === null) return;
+    const candidate = { ...piece, x: piece.x + dx };
+    if (!canPlace(candidate)) return;
+    piece = candidate;
+    render();
+    updateLockTimer(true);
+  }
+
+  function rotate(direction) {
+    if (state !== "playing" || piece === null) return;
+    const newRotation = (piece.rotation + direction + 4) % 4;
+    const candidates = piece.type === 2 ? [[0, 0]] :
+      (piece.type === 3 ? I_KICKS : KICKS)[`${piece.rotation}>${newRotation}`];
+    for (const [dx, dyUp] of candidates) {
+      const candidate = {
+        ...piece,
+        rotation: newRotation,
+        x: piece.x + dx,
+        y: piece.y - dyUp,
+      };
+      if (!canPlace(candidate)) continue;
+      piece = candidate;
+      render();
+      updateLockTimer(true);
+      return;
+    }
+  }
+
   function hardDrop() {
-    if (status !== "running") return;
-    undraw();
+    if (state !== "playing" || piece === null) return;
     let distance = 0;
-    while (canPlace({ ...currentPosition, y: currentPosition.y + 1 })) {
-      currentPosition.y++;
+    while (canPlace({ ...piece, y: piece.y + 1 })) {
+      piece.y++;
       distance++;
     }
     score += distance * 2;
-    draw();
-    record("hard_drop", String(distance));
-    freeze(true);
-  }
-
-  // Lock the active piece after the floor/stack is reached, or on hard drop.
-  function freeze(force = false) {
-    if (status !== "running") return;
-    if (!force) {
-      updateLockTimer();
-      return;
-    }
-    clearLockTimer();
-    undraw();
-    getCells().forEach(({ index }) => {
-      squares[index].classList.add("taken");
-      squares[index].classList.add("tetromino");
-      squares[index].style.backgroundColor = colors[random];
-    });
-    piecesPlaced++;
-    record("piece_locked");
-    addScore();
-    holdUsed = false;
-    spawnNext();
-    updateDisplay();
-  }
-
-  function moveLeft() {
-    if (status !== "running") return;
-    const candidate = { ...currentPosition, x: currentPosition.x - 1 };
-    if (!canPlace(candidate)) return;
-    undraw();
-    currentPosition = candidate;
-    draw();
-    updateLockTimer(true);
-    record("move_left");
-  }
-
-  function moveRight() {
-    if (status !== "running") return;
-    const candidate = { ...currentPosition, x: currentPosition.x + 1 };
-    if (!canPlace(candidate)) return;
-    undraw();
-    currentPosition = candidate;
-    draw();
-    updateLockTimer(true);
-    record("move_right");
-  }
-
-  // Rotate with standard SRS kick checks. dir=1 clockwise, -1 counter-clockwise.
-  function rotate(dir = 1) {
-    if (status !== "running") return;
-    const newRotation = (currentRotation + dir + 4) % 4;
-    const kicks = random === 2 ? [[0, 0]] :
-      (random === 3 ? iKicks : standardKicks)[`${currentRotation}>${newRotation}`];
-    for (const [dx, dyUp] of kicks) {
-      const candidate = { x: currentPosition.x + dx, y: currentPosition.y - dyUp };
-      if (canPlace(candidate, newRotation)) {
-        undraw();
-        currentPosition = candidate;
-        currentRotation = newRotation;
-        current = theTetrominoes[random][currentRotation];
-        draw();
-        updateLockTimer(true);
-        record(dir === 1 ? "rotate_cw" : "rotate_ccw");
-        return;
-      }
-    }
-  }
-
-  // Next-piece preview, using the existing 4-by-4 mini-grid.
-  const displaySquares = document.querySelectorAll(".mini-grid div");
-  const holdSquares = document.querySelectorAll(".hold-grid div");
-  const upNextTetrominoes = theTetrominoes.map((rotations) => rotations[0].map((offset) =>
-    Math.floor(offset / width) * 4 + (offset % width)
-  ));
-
-  function paintPreview(cells, type) {
-    cells.forEach((square) => {
-      square.classList.remove("tetromino");
-      square.style.backgroundColor = "";
-    });
-    if (type === null || type === undefined) return;
-    upNextTetrominoes[type].forEach((index) => {
-      cells[index].classList.add("tetromino");
-      cells[index].style.backgroundColor = colors[type];
-    });
-  }
-
-  function displayShape() {
-    paintPreview(displaySquares, nextRandom);
-    paintPreview(holdSquares, heldPiece);
+    logEvent("hard_drop", `${distance} rows`);
+    lockPiece();
   }
 
   function hold() {
-    if (!experiment.enableHold || holdUsed || status !== "running") return;
-    undraw();
+    if (state !== "playing" || piece === null || holdUsed) return;
     clearLockTimer();
-    const previous = random;
-    if (heldPiece === null) {
-      random = nextRandom;
-      nextRandom = takePiece();
+    const previousType = piece.type;
+    if (heldType === null) {
+      piece = newPiece(nextType);
+      nextType = takePiece();
     } else {
-      random = heldPiece;
+      piece = newPiece(heldType);
     }
-    heldPiece = previous;
+    heldType = previousType;
     holdUsed = true;
-    currentPosition = spawnPosition(random);
-    currentRotation = 0;
-    current = theTetrominoes[random][currentRotation];
+    logEvent("hold", PIECE_NAMES[previousType]);
     lockResets = 0;
-    displayShape();
-    record("hold", pieceNames[heldPiece]);
-    if (!canPlace(currentPosition)) gameOver("blocked_spawn");
-    else {
-      draw();
-      updateLockTimer();
-    }
-  }
-
-  function spawnPosition(type) {
-    return { x: type === 2 ? 4 : 3, y: 0 };
-  }
-
-  function spawnNext() {
-    random = nextRandom;
-    nextRandom = takePiece();
-    currentRotation = 0;
-    current = theTetrominoes[random][currentRotation];
-    currentPosition = spawnPosition(random);
-    lockResets = 0;
-    displayShape();
-    if (!canPlace(currentPosition)) {
-      gameOver("blocked_spawn");
+    if (!canPlace(piece)) {
+      piece = null;
+      endGame();
       return;
     }
-    draw();
-    record("piece_spawned");
-    updateLockTimer();
-  }
-
-  function stopTimers() {
-    stopAllRepeating();
-    if (timerId !== null) clearInterval(timerId);
-    if (clockId !== null) clearInterval(clockId);
-    timerId = null;
-    clockId = null;
-    clearLockTimer();
-  }
-
-  function startTimers() {
-    sessionStart = performance.now();
-    const gravity = experiment.progressiveSpeed
-      ? Math.max(100, Math.round(experiment.gravityMs * Math.pow(0.8, level - 1)))
-      : experiment.gravityMs;
-    timerId = setInterval(() => moveDown(false), gravity);
-    clockId = setInterval(() => {
-      if (experiment.durationSeconds && elapsedMs() >= experiment.durationSeconds * 1000) {
-        finishGame("time_limit");
-      } else updateDisplay();
-    }, 100);
+    render();
     updateLockTimer();
   }
 
   function resetGame() {
+    if (gameNumber > 0 && state !== "ready" && state !== "over") {
+      logEvent("reset", "New game requested");
+    }
     stopTimers();
-    squares.forEach((square, index) => {
-      square.classList.remove("tetromino", "ghost", "taken");
-      square.style.backgroundColor = "";
-      if (index >= height * width) square.classList.add("taken"); // original hidden bottom row
-    });
+    gameNumber++;
+    lastSnapshotSecond = 0;
+    board = Array.from({ length: HEIGHT }, () => Array(WIDTH).fill(null));
+    bag = [];
+    piece = newPiece(takePiece());
+    nextType = takePiece();
+    heldType = null;
+    holdUsed = false;
     score = 0;
     lines = 0;
     level = 1;
     piecesPlaced = 0;
     lockResets = 0;
-    heldPiece = null;
-    holdUsed = false;
-    activeElapsedMs = 0;
-    sessionStart = 0;
-    randomState = experiment.seed;
-    bag = [];
-    log = [];
-    random = takePiece();
-    nextRandom = takePiece();
-    currentRotation = 0;
-    currentPosition = spawnPosition(random);
-    current = theTetrominoes[random][currentRotation];
-    status = "idle";
-    finishReason = null;
-    displayShape();
+    elapsedBeforePause = 0;
+    runningSince = 0;
+    state = "ready";
+    render();
     updateDisplay();
+    logEvent("ready");
+  }
+
+  function pauseGame() {
+    if (state !== "playing") return;
+    elapsedBeforePause = elapsedMs();
+    state = "paused";
+    stopTimers();
+    updateDisplay();
+    logEvent("paused");
   }
 
   function toggleStartPause() {
-    if (status === "idle" || status === "finished") {
-      resetGame();
-      status = "running";
-      record("trial_started", `duration=${experiment.durationSeconds || "unlimited"}`);
-      draw();
-      record("piece_spawned");
+    if (state === "over") resetGame();
+    if (state === "ready" || state === "paused") {
+      const event = state === "ready" ? "started" : "resumed";
+      state = "playing";
       startTimers();
-    } else if (status === "running") {
-      if (!experiment.allowPause) return;
-      record("paused");
-      activeElapsedMs = elapsedMs();
-      status = "paused";
-      stopTimers();
-    } else if (status === "paused") {
-      status = "running";
-      record("resumed");
-      startTimers();
+      render();
+      logEvent(event);
+    } else if (state === "playing") {
+      pauseGame();
     }
     updateDisplay();
   }
-  startBtn.addEventListener("click", toggleStartPause);
-  resetBtn.addEventListener("click", resetGame);
 
-  // Clear one or more rows during the same lock, then score them as one event.
-  function addScore() {
-    let removedLines = 0;
-    for (let row = height - 1; row >= 0;) {
-      const start = row * width;
-      const indices = Array.from({ length: width }, (_, x) => start + x);
-      if (!indices.every((index) => squares[index].classList.contains("taken"))) {
-        row--;
-        continue;
-      }
-      const squaresRemoved = squares.splice(start, width);
-      squaresRemoved.forEach((square) => {
-        square.classList.remove("taken", "tetromino", "ghost");
-        square.style.backgroundColor = "";
-      });
-      squares = squaresRemoved.concat(squares);
-      removedLines++;
-      // Recheck the same row: rows above have just shifted down.
+  document.addEventListener("keydown", (event) => {
+    // Typing in the ID field must not move, rotate or pause the game.
+    if (event.target instanceof Element &&
+        event.target.closest("input, textarea, select, [contenteditable]")) return;
+    const controlledKeys = [
+      "ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp", "KeyX", "KeyZ",
+      "Space", "KeyC", "ShiftLeft", "ShiftRight", "KeyP", "Escape",
+    ];
+    if (controlledKeys.includes(event.code) &&
+        (state === "playing" || state === "paused")) event.preventDefault();
+
+    if ((event.code === "KeyP" || event.code === "Escape") && !event.repeat) {
+      if (state === "playing" || state === "paused") toggleStartPause();
+      return;
     }
-    if (removedLines) {
-      squares.forEach((cell) => grid.appendChild(cell));
-      // Guideline-style base scoring, without combo / T-spin bonuses.
-      score += [0, 100, 300, 500, 800][removedLines] * level;
-      lines += removedLines;
-      record("lines_cleared", String(removedLines));
-      if (experiment.progressiveSpeed) {
-        const newLevel = 1 + Math.floor(lines / 10);
-        if (newLevel !== level) {
-          level = newLevel;
-          if (timerId !== null) clearInterval(timerId);
-          timerId = setInterval(() => moveDown(false), Math.max(100,
-            Math.round(experiment.gravityMs * Math.pow(0.8, level - 1))));
-          record("level_up", String(level));
-        }
+    if (state !== "playing") return;
+    if (["ArrowLeft", "ArrowRight", "ArrowDown"].includes(event.code)) {
+      if (event.repeat) return;
+      if (event.code === "ArrowLeft") {
+        stopKeyRepeat("ArrowRight");
+        startKeyRepeat(event.code, () => moveHorizontal(-1));
+      } else if (event.code === "ArrowRight") {
+        stopKeyRepeat("ArrowLeft");
+        startKeyRepeat(event.code, () => moveHorizontal(1));
+      } else {
+        startKeyRepeat(event.code, () => moveDown(true));
       }
+      return;
     }
-  }
+    if (event.repeat) return;
+    if (event.code === "ArrowUp" || event.code === "KeyX") rotate(1);
+    else if (event.code === "KeyZ") rotate(-1);
+    else if (event.code === "Space") hardDrop();
+    else if (["KeyC", "ShiftLeft", "ShiftRight"].includes(event.code)) hold();
+  });
 
-  function finishGame(reason) {
-    if (status !== "running" && status !== "paused") return;
-    record("trial_ended", reason);
-    activeElapsedMs = elapsedMs();
-    finishReason = reason;
-    status = "finished";
-    stopTimers();
-    updateDisplay();
-  }
+  document.addEventListener("keyup", (event) => stopKeyRepeat(event.code));
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) pauseGame();
+  });
+  window.addEventListener("blur", pauseGame);
+  startButton.addEventListener("click", toggleStartPause);
+  resetButton.addEventListener("click", resetGame);
+  exportButton.addEventListener("click", exportGameLog);
+  playerIdInput.addEventListener("input", () => { exportFeedback.textContent = ""; });
 
-  function gameOver(reason = "blocked_spawn") {
-    finishGame(reason);
-  }
+  // Show full instructions on larger screens; collapse them on small viewports
+  // to keep the board and controls visible without scrolling.
+  const instructions = document.querySelector("#game-instructions");
+  const spaciousViewport = window.matchMedia("(min-width: 760px) and (min-height: 620px)");
+  instructions.open = spaciousViewport.matches;
+  spaciousViewport.addEventListener("change", (event) => {
+    instructions.open = event.matches;
+  });
 
   resetGame();
 });

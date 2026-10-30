@@ -1,295 +1,68 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Document</title>
-    <script src="01-app.js" charset="utf-8"></script>
-    <link rel="stylesheet" href="02-style.css" />
-  </head>
-  <body>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Play Tetris</title>
+  <link rel="stylesheet" href="02-style.css">
+  <script src="01-app.js" defer></script>
+</head>
+<body>
+  <div class="game-shell">
     <h1>Let's play Tetris!</h1>
-    <div class="stats">
-      <button class="status"><h3><span id="status">Ready</span></h3></button>
-      <button><h3>Score: <span id="score"></span></h3></button>
-      <button><h3>Lines: <span id="lines">0</span></h3></button>
-      <button><h3>Level: <span id="level">1</span></h3></button>
-      <button><h3>Pieces: <span id="pieces">0</span></h3></button>
-      <button><h3>Time: <span id="time">0.0s</span></h3></button>
-    </div>
-    <br /><br />
+
+    <section class="stats" aria-label="Game statistics">
+      <div class="stat status" id="status-panel" data-state="ready" role="status" aria-live="polite">
+        <span class="stat-label">Game status</span><span class="stat-value" id="status">Ready</span>
+      </div>
+      <div class="stat"><span class="stat-label">Score</span><span class="stat-value" id="score">0</span></div>
+      <div class="stat"><span class="stat-label">Lines</span><span class="stat-value" id="lines">0</span></div>
+      <div class="stat"><span class="stat-label">Level</span><span class="stat-value" id="level">1</span></div>
+      <div class="stat"><span class="stat-label">Pieces</span><span class="stat-value" id="pieces">0</span></div>
+      <div class="stat"><span class="stat-label">Time</span><span class="stat-value" id="time">00:00</span></div>
+    </section>
+
     <div class="game-functions">
-      <button id="start-button">Start</button>
-      <button id="reset-button">Reset game</button>
-    </div>
-    <br /><br />
-    <div class="container">
-      <div class="grid">
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div class="taken"></div>
-        <div class="taken"></div>
-        <div class="taken"></div>
-        <div class="taken"></div>
-        <div class="taken"></div>
-        <div class="taken"></div>
-        <div class="taken"></div>
-        <div class="taken"></div>
-        <div class="taken"></div>
-        <div class="taken"></div>
+      <button type="button" id="start-button">Start</button>
+      <button type="button" id="reset-button">Reset game</button>
+      <div class="export-group">
+        <label for="player-id">ID</label>
+        <input type="text" id="player-id" name="player-id" placeholder="e.g. P001"
+               maxlength="50" autocomplete="off" spellcheck="false"
+               aria-describedby="export-feedback">
+        <button type="button" id="export-button" disabled>Export game log (CSV)</button>
       </div>
-      <div>
-        <div><h4 style="text-align: center;">Next</h4></div>
-        <div class="mini-grid">
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
+    </div>
+    <p id="export-feedback" class="export-feedback" role="status" aria-live="polite"></p>
+
+    <main class="game-layout">
+      <div id="game-grid" class="game-grid" role="img" aria-label="Tetris playing field: 10 columns and 20 rows"></div>
+
+      <div class="side-panel">
+        <section class="preview-wrap" aria-label="Next piece">
+          <h2>Next</h2>
+          <div id="next-grid" class="preview" aria-hidden="true"></div>
+        </section>
+        <section class="preview-wrap" aria-label="Held piece">
+          <h2>Hold</h2>
+          <div id="hold-grid" class="preview" aria-hidden="true"></div>
+        </section>
       </div>
-      <div><h4 style="text-align: center;">Hold</h4>
-      <div class="hold-grid">
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
-      <div></div>
-    </div>
-    </div>
+
+      <details class="instructions" id="game-instructions" aria-labelledby="instructions-title">
+        <summary id="instructions-title">Instructions</summary>
+        <ul>
+          <li><kbd>←</kbd> <kbd>→</kbd> Move</li>
+          <li><kbd>↓</kbd> Soft drop</li>
+          <li><kbd>↑</kbd> or <kbd>X</kbd> Rotate clockwise</li>
+          <li><kbd>Z</kbd> Rotate counterclockwise</li>
+          <li><kbd>Space</kbd> Hard drop</li>
+          <li><kbd>C</kbd> or <kbd>Shift</kbd> Hold piece</li>
+          <li><kbd>P</kbd> or <kbd>Esc</kbd> Pause / resume</li>
+        </ul>
+        <p>The game pauses when you switch away from its window. Complete lines to increase your score and level.</p>
+      </details>
+    </main>
   </div>
-    <div class="instructions">
-      <h3>Instructions</h3>
-      <p>1. ← → move </p>
-      <p>2. ↓ soft drop</p>
-      <p>3. ↑ or X rotate</p>
-      <p>4. Z rotate back</p>
-      <p>5. Space hard drop</p>
-      <p>6. C or Shift hold</p>
-      <p>7. P pause</p>
-    </div>
 </body>
 </html>
-
-
