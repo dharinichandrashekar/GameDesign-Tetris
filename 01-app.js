@@ -27,6 +27,20 @@ document.addEventListener("DOMContentLoaded", () => {
   const exportButton = document.querySelector("#export-button");
   const playerIdInput = document.querySelector("#player-id");
   const exportFeedback = document.querySelector("#export-feedback");
+  const logSummary = document.querySelector("#log-summary");
+  const storageNotice = document.querySelector("#storage-notice");
+  const resetDialog = document.querySelector("#reset-dialog");
+  const resetConfirmButton = document.querySelector("#reset-confirm");
+  const resetExportAllButton = document.querySelector("#reset-export-all");
+  const confirmationDialog = document.querySelector("#confirmation-dialog");
+  const confirmationTitle = document.querySelector("#confirmation-title");
+  const confirmationDetails = document.querySelector("#confirmation-details");
+  const confirmationCloseButton = document.querySelector("#confirmation-close");
+  const resetDataSummary = document.querySelector("#reset-data-summary");
+  const switchIdButton = document.querySelector("#switch-id-button");
+  const switchDialog = document.querySelector("#switch-dialog");
+  const switchConfirmButton = document.querySelector("#switch-confirm");
+  const switchDataSummary = document.querySelector("#switch-data-summary");
 
   if (!window.crypto || typeof window.crypto.getRandomValues !== "function") {
     statusDisplay.textContent = "Browser unsupported";
@@ -110,25 +124,266 @@ document.addEventListener("DOMContentLoaded", () => {
   let elapsedBeforePause = 0;
   let runningSince = 0;
   const heldKeys = new Map();
-  // This log stays in memory only and is preserved across resets in this tab.
-  // It records game status and statistics, not individual key presses.
+  // Each event stores its original ID and game number. New game preserves logs;
+  // confirmed Reset clears logs for every ID. IndexedDB is preferred.
   const gameLog = [];
   let gameNumber = 0;
-  let hasStarted = false;
+  let activeId = "";
+  let exportedCounts = {};
+  let storageReady = false;
+  let storageMode = "memory";
+  let storageProblem = "";
+  let database = null;
+  let saveQueue = Promise.resolve();
   let lastSnapshotSecond = 0;
+  let resetInProgress = false;
+  let resumeAfterDialog = false;
+
+  // Inline messages are reserved for validation and failed exports/storage writes.
+  function setFeedback(message) {
+    exportFeedback.textContent = message;
+  }
+
+  // Shared, per-ID counts used in reset preview, exports and acknowledgements.
+  function trialBreakdown(rows = gameLog) {
+    const counts = new Map();
+    for (const row of rows) {
+      if (!counts.has(row.id)) counts.set(row.id, new Set());
+      counts.get(row.id).add(row.game);
+    }
+    return [...counts].sort(([a], [b]) => a.localeCompare(b))
+      .map(([id, trials]) => `ID: ${id}, trials: ${trials.size}`)
+      .join("\n") || "No saved trials";
+  }
+
+  function pageIsActive() {
+    return document.visibilityState === "visible" && document.hasFocus();
+  }
+
+  // UI dialogs suspend the clock without producing artificial paused/resumed events.
+  function suspendForDialog() {
+    if (state === "playing") {
+      resumeAfterDialog = true;
+      pauseGame("dialog", false);
+    }
+  }
+
+  function restoreAfterDialog() {
+    if (resetDialog.open || switchDialog.open || confirmationDialog.open || resetInProgress) return;
+    const shouldResume = resumeAfterDialog;
+    resumeAfterDialog = false;
+    if (shouldResume && state === "paused" && pageIsActive()) resumeGame(false);
+  }
+
+  function showConfirmation(title, details) {
+    setFeedback("");
+    suspendForDialog();
+    confirmationTitle.textContent = title;
+    confirmationDetails.textContent = details;
+    // The user must explicitly dismiss the confirmation with × or Escape.
+    if (!confirmationDialog.open) confirmationDialog.showModal();
+  }
+
+  confirmationDialog.addEventListener("close", () => {
+    restoreAfterDialog();
+  });
+  confirmationCloseButton.addEventListener("click", () => confirmationDialog.close());
+  // Native Esc cancellation closes this notification; no extra confirmation needed.
+  resetDialog.addEventListener("close", restoreAfterDialog);
+  switchDialog.addEventListener("close", restoreAfterDialog);
+
+  const DB_NAME = "tetris_saved_game_logs_v1";
+  const FALLBACK_KEY = "tetris_saved_game_logs_fallback_v1";
 
   function formatElapsedTime(milliseconds) {
     const totalSeconds = Math.floor(Math.max(0, milliseconds) / 1000);
     return `${String(Math.floor(totalSeconds / 60)).padStart(2, "0")}:${String(totalSeconds % 60).padStart(2, "0")}`;
   }
 
-  function logEvent(event, details = "") {
+  function idRows(id) {
+    return gameLog.filter((row) => row.id === id);
+  }
+
+  function idGameCount(id) {
+    return new Set(idRows(id).map((row) => row.game)).size;
+  }
+
+  function metadata() {
+    return { activeId, exportedCounts: { ...exportedCounts }, savedAt: Date.now() };
+  }
+
+  function updateLogControls() {
+    const id = activeId || playerIdInput.value.trim();
+    const logs = id ? idRows(id) : [];
+    const totalGames = new Set(gameLog.map((row) => `${row.id}\u0000${row.game}`)).size;
+    // Allow invalid requests to display the requested inline guidance.
+    startButton.disabled = !storageReady || resetInProgress;
+    exportButton.disabled = !storageReady || resetInProgress;
+    playerIdInput.readOnly = Boolean(activeId);
+    playerIdInput.title = activeId ? "ID is locked. Use Switch ID to change players without deleting logs." : "Enter an ID to begin.";
+    switchIdButton.disabled = !storageReady || !activeId || resetInProgress;
+    logSummary.textContent = `Saved trials: ${totalGames}`;
+    storageNotice.textContent = storageProblem || (storageMode === "indexeddb" ? "Auto-saved in this browser" :
+      storageMode === "localstorage" ? "Auto-saved in browser storage (limited capacity)" : "Not saved to disk: export regularly");
+  }
+
+  function storageFailure(error) {
+    storageProblem = "Auto-save failed. Export CSV now; closing the page may lose new data.";
+    console.error("Tetris log save failed:", error);
+    setFeedback(storageProblem);
+    updateLogControls();
+  }
+
+  function persistFallback() {
+    try {
+      localStorage.setItem(FALLBACK_KEY, JSON.stringify({ version: 1, rows: gameLog, ...metadata() }));
+      return true;
+    } catch (error) {
+      storageFailure(error);
+      return false;
+    }
+  }
+
+  // Every event is written in order. The destructive reset drains this queue.
+  function enqueueSave(row = null) {
+    if (!storageReady) return;
+    if (storageMode === "localstorage") {
+      persistFallback();
+      return;
+    }
+    if (storageMode !== "indexeddb") return;
+    const meta = metadata();
+    saveQueue = saveQueue.then(() => new Promise((resolve, reject) => {
+      const tx = database.transaction(["rows", "meta"], "readwrite");
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+      const rows = tx.objectStore("rows");
+      if (row) rows.add(row);
+      tx.objectStore("meta").put({ key: "session", ...meta });
+    })).catch((error) => {
+      // A failed IndexedDB write must not silently drop in-memory data.
+      storageFailure(error);
+      storageMode = "localstorage";
+      persistFallback();
+      updateLogControls();
+    });
+  }
+
+  function openDatabase() {
+    return new Promise((resolve, reject) => {
+      if (!window.indexedDB) { reject(new Error("IndexedDB unavailable")); return; }
+      const request = indexedDB.open(DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains("rows")) db.createObjectStore("rows", { autoIncrement: true });
+        if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath: "key" });
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  function readDatabase(db) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(["rows", "meta"], "readonly");
+      const rowsRequest = tx.objectStore("rows").getAll();
+      const metaRequest = tx.objectStore("meta").get("session");
+      tx.oncomplete = () => resolve({ rows: rowsRequest.result || [], meta: metaRequest.result || {} });
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  function loadFallback() {
+    try {
+      const raw = localStorage.getItem(FALLBACK_KEY);
+      const saved = raw ? JSON.parse(raw) : {};
+      return { rows: Array.isArray(saved.rows) ? saved.rows : [], meta: saved };
+    } catch (error) {
+      storageFailure(error);
+      return { rows: [], meta: {} };
+    }
+  }
+
+  function closeInterruptedGames() {
+    const lastPerGame = new Map();
+    const completedGames = new Set();
+    for (const row of gameLog) {
+      const gameKey = `${row.id}\u0000${row.game}`;
+      lastPerGame.set(gameKey, row);
+      if (["game_over", "game_reset", "interrupted_reload", "interrupted_switch"].includes(row.event)) completedGames.add(gameKey);
+    }
+    for (const [gameKey, row] of lastPerGame) {
+      if (completedGames.has(gameKey)) continue;
+      const interrupted = {
+        ...row, timestamp_utc: new Date().toISOString(), event: "interrupted_reload",
+        status: "Interrupted", details: "Page was reloaded or closed before the game finished",
+      };
+      gameLog.push(interrupted);
+      enqueueSave(interrupted);
+    }
+  }
+
+  async function initializeStorage() {
+    let loaded;
+    try {
+      database = await openDatabase();
+      loaded = await readDatabase(database);
+      storageMode = "indexeddb";
+      // If IndexedDB previously failed and switched to localStorage, recover
+      // the newer fallback instead of silently discarding its extra events.
+      const fallback = loadFallback();
+      const fallbackIsNewer = fallback.rows.length && (
+        fallback.rows.length > loaded.rows.length ||
+        (fallback.rows.length === loaded.rows.length &&
+          (fallback.meta.savedAt || 0) > (loaded.meta.savedAt || 0))
+      );
+      if (fallbackIsNewer) {
+        await new Promise((resolve, reject) => {
+          const tx = database.transaction(["rows", "meta"], "readwrite");
+          tx.oncomplete = resolve;
+          tx.onerror = () => reject(tx.error);
+          const rowStore = tx.objectStore("rows");
+          rowStore.clear();
+          for (const row of fallback.rows) rowStore.add(row);
+          tx.objectStore("meta").put({ key: "session", ...{
+            activeId: fallback.meta.activeId || "",
+            exportedCounts: fallback.meta.exportedCounts || {},
+            savedAt: fallback.meta.savedAt || Date.now(),
+          } });
+        });
+        loaded = fallback;
+        try { localStorage.removeItem(FALLBACK_KEY); } catch (_) { /* Keep DB copy. */ }
+      }
+    } catch (error) {
+      if (database) database.close();
+      database = null;
+      loaded = loadFallback();
+      storageMode = "localstorage";
+    }
+    for (const row of loaded.rows || []) {
+      if (row && typeof row.id === "string" && Number.isInteger(row.game) && row.game > 0) gameLog.push(row);
+    }
+    activeId = typeof loaded.meta?.activeId === "string" ? loaded.meta.activeId : "";
+    exportedCounts = loaded.meta?.exportedCounts && typeof loaded.meta.exportedCounts === "object"
+      ? loaded.meta.exportedCounts : {};
+    playerIdInput.value = activeId;
+    storageReady = true;
+    closeInterruptedGames();
+    prepareGame();
+    enqueueSave();
+    updateLogControls();
+  }
+
+  function logEvent(event, details = "", statusOverride = "") {
+    if (!activeId || gameNumber === 0) return;
     const ms = elapsedMs();
-    gameLog.push({
+    const row = {
+      id: activeId,
       game: gameNumber,
       timestamp_utc: new Date().toISOString(),
       event,
-      status: STATUS_LABELS[state],
+      status: statusOverride || STATUS_LABELS[state],
       elapsed_mm_ss: formatElapsedTime(ms),
       elapsed_seconds: (ms / 1000).toFixed(2),
       score,
@@ -139,28 +394,24 @@ document.addEventListener("DOMContentLoaded", () => {
       next_piece: PIECE_NAMES[nextType],
       held_piece: heldType === null ? "" : PIECE_NAMES[heldType],
       details,
-    });
-    if (event === "started") hasStarted = true;
-    exportButton.disabled = !hasStarted;
+    };
+    gameLog.push(row);
+    enqueueSave(row);
+    updateLogControls();
   }
 
   function exportGameLog() {
-    if (!hasStarted) return;
-    const id = playerIdInput.value.trim();
-    if (!id) {
-      exportFeedback.textContent = "Enter an ID before exporting the game log.";
-      playerIdInput.focus();
-      return;
+    const id = activeId || playerIdInput.value.trim();
+    const rows = idRows(id);
+    if (!id || !rows.length) {
+      setFeedback("Enter an ID with saved game logs before exporting.");
+      return false;
     }
-    // Keep the exact entered ID in the CSV; normalize only the filename.
-    const safeId = id.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
-    if (!safeId) {
-      exportFeedback.textContent = "Use an ID containing at least one letter or number (A-Z, 0-9).";
-      playerIdInput.focus();
-      return;
-    }
-    exportFeedback.textContent = "";
-    logEvent("log_exported");
+    // Export only the selected ID, using the ID frozen into each event at start.
+    // An ongoing game can be exported; any later events remain unexported.
+    logEvent("export_requested", "CSV download initiated");
+    const currentRows = idRows(id);
+    const safeId = id.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "ID";
     const columns = [
       ["ID", "id"], ["Game", "game"], ["Timestamp (UTC)", "timestamp_utc"],
       ["Event", "event"], ["Status", "status"],
@@ -170,29 +421,39 @@ document.addEventListener("DOMContentLoaded", () => {
       ["Next piece", "next_piece"], ["Held piece", "held_piece"],
       ["Details", "details"],
     ];
-    // Guard spreadsheet viewers against interpreting a user-entered ID as a formula.
     const csvCell = (value) => {
       const plain = String(value ?? "");
       const safe = /^[\s]*[=+\-@]/.test(plain) ? `'${plain}` : plain;
       return `"${safe.replaceAll('"', '""')}"`;
     };
     const csv = [columns.map(([name]) => csvCell(name)).join(","),
-      ...gameLog.map((row) => columns.map(([, key]) => csvCell(key === "id" ? id : row[key])).join(","))
+      ...currentRows.map((row) => columns.map(([, key]) => csvCell(row[key])).join(","))
     ].join("\r\n");
     const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    // Local date and time, with filename-safe separators (YYYY-MM-DD_HH-mm-ss).
     const now = new Date();
     const pad2 = (n) => String(n).padStart(2, "0");
     const date = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
     const time = `${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}`;
     link.download = `Tetris_game_log_${date}_${time}_${safeId}.csv`;
     document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    try {
+      link.click();
+      exportedCounts[id] = currentRows.length;
+      enqueueSave();
+      showConfirmation("CSV export initiated", `${trialBreakdown(currentRows)}\n\nVerify the file downloaded.`);
+      return true;
+    } catch (error) {
+      setFeedback("Download was blocked. Try exporting again.");
+      console.error(error);
+      return false;
+    } finally {
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      updateLogControls();
+    }
   }
 
   // Use unbiased, browser-provided cryptographic randomness for every shuffle.
@@ -301,6 +562,7 @@ document.addEventListener("DOMContentLoaded", () => {
       paused: "Resume",
       over: "New game",
     }[state];
+    if (storageReady) updateLogControls();
   }
 
   function clearLockTimer() {
@@ -516,13 +778,10 @@ document.addEventListener("DOMContentLoaded", () => {
     updateLockTimer();
   }
 
-  function resetGame() {
-    if (gameNumber > 0 && state !== "ready" && state !== "over") {
-      logEvent("reset", "New game requested");
-    }
+  function prepareGame() {
     stopTimers();
-    gameNumber++;
     lastSnapshotSecond = 0;
+    gameNumber = 0;
     board = Array.from({ length: HEIGHT }, () => Array(WIDTH).fill(null));
     bag = [];
     piece = newPiece(takePiece());
@@ -539,33 +798,199 @@ document.addEventListener("DOMContentLoaded", () => {
     state = "ready";
     render();
     updateDisplay();
-    logEvent("ready");
   }
 
-  function pauseGame() {
+  function startNewGame() {
+    if (!pageIsActive() || resetDialog.open || switchDialog.open || confirmationDialog.open) return;
+    const requestedId = activeId || playerIdInput.value.trim();
+    if (!requestedId) {
+      setFeedback("Enter an ID before starting a game.");
+      playerIdInput.focus();
+      return;
+    }
+    if (!activeId) activeId = requestedId;
+    playerIdInput.value = activeId;
+    gameNumber = idRows(activeId).reduce((max, row) => Math.max(max, row.game), 0) + 1;
+    state = "playing";
+    startTimers();
+    render();
+    logEvent("started");
+    updateDisplay();
+    updateLogControls();
+    setFeedback("");
+  }
+
+  function pauseGame(reason = "manual", record = true) {
     if (state !== "playing") return;
     elapsedBeforePause = elapsedMs();
     state = "paused";
     stopTimers();
     updateDisplay();
-    logEvent("paused");
+    if (record) logEvent("paused", reason);
+  }
+
+  function resumeGame(record = true) {
+    if (state !== "paused" || !pageIsActive() || resetInProgress ||
+        resetDialog.open || switchDialog.open || confirmationDialog.open) return;
+    state = "playing";
+    startTimers();
+    render();
+    updateDisplay();
+    if (record) logEvent("resumed");
   }
 
   function toggleStartPause() {
-    if (state === "over") resetGame();
-    if (state === "ready" || state === "paused") {
-      const event = state === "ready" ? "started" : "resumed";
-      state = "playing";
-      startTimers();
-      render();
-      logEvent(event);
-    } else if (state === "playing") {
-      pauseGame();
-    }
+    if (state === "over") prepareGame();
+    if (state === "ready") startNewGame();
+    else if (state === "paused") resumeGame();
+    else if (state === "playing") pauseGame();
     updateDisplay();
+    updateLogControls();
   }
 
+  function requestReset() {
+    if (!storageReady || resetInProgress || resetDialog.open || confirmationDialog.open || switchDialog.open) return;
+    suspendForDialog();
+    resetDataSummary.textContent = trialBreakdown();
+    resetConfirmButton.disabled = false;
+    resetExportAllButton.disabled = false;
+    resetDialog.showModal();
+    document.querySelector("#reset-cancel").focus();
+  }
+
+  function requestSwitch() {
+    if (!storageReady || !activeId || resetInProgress || switchDialog.open || resetDialog.open || confirmationDialog.open) return;
+    suspendForDialog();
+    switchDataSummary.textContent = trialBreakdown(idRows(activeId));
+    switchDialog.showModal();
+    document.querySelector("#switch-cancel").focus();
+  }
+
+  function confirmSwitch() {
+    if (!switchDialog.open) return;
+    // A mid-trial switch ends that trial without deleting any past events.
+    if (gameNumber && (state === "paused" || state === "playing")) {
+      logEvent("interrupted_switch", "Player ID changed; trial ended early", "Interrupted");
+    }
+    resumeAfterDialog = false;
+    activeId = "";
+    playerIdInput.value = "";
+    prepareGame();
+    enqueueSave();
+    updateLogControls();
+    switchDialog.close();
+    playerIdInput.focus();
+  }
+
+  function exportAllLogs() {
+    if (!gameLog.length) {
+      resetDialog.close();
+      setFeedback("No saved trials are available to export.");
+      return false;
+    }
+    const columns = [
+      ["ID", "id"], ["Game", "game"], ["Timestamp (UTC)", "timestamp_utc"],
+      ["Event", "event"], ["Status", "status"],
+      ["Elapsed (MM:SS)", "elapsed_mm_ss"], ["Elapsed (seconds)", "elapsed_seconds"],
+      ["Score", "score"], ["Lines", "lines"], ["Level", "level"],
+      ["Pieces placed", "pieces_placed"], ["Current piece", "current_piece"],
+      ["Next piece", "next_piece"], ["Held piece", "held_piece"], ["Details", "details"],
+    ];
+    const csvCell = (value) => {
+      const plain = String(value ?? "");
+      const safe = /^[\s]*[=+\-@]/.test(plain) ? `'${plain}` : plain;
+      return `"${safe.replaceAll('"', '""')}"`;
+    };
+    const csv = [columns.map(([name]) => csvCell(name)).join(","),
+      ...gameLog.map((row) => columns.map(([, key]) => csvCell(row[key])).join(","))
+    ].join("\r\n");
+    const url = URL.createObjectURL(new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    const now = new Date();
+    const pad2 = (n) => String(n).padStart(2, "0");
+    const date = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+    const time = `${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}`;
+    link.href = url;
+    link.download = `Tetris_Log_${date}_${time}_ALL_IDS.csv`;
+    document.body.appendChild(link);
+    try {
+      link.click();
+      for (const id of new Set(gameLog.map((row) => row.id))) exportedCounts[id] = idRows(id).length;
+      enqueueSave();
+      const summary = trialBreakdown(gameLog);
+      resetDialog.close();
+      showConfirmation("CSV export initiated", `${summary}\n\nVerify the backup downloaded.`);
+      return true;
+    } catch (error) {
+      resetDialog.close();
+      setFeedback("Backup export failed. Your saved logs have not been deleted.");
+      console.error(error);
+      return false;
+    } finally {
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  }
+
+  async function confirmFullReset() {
+    if (resetInProgress || !resetDialog.open) return;
+    resetInProgress = true;
+    resetConfirmButton.disabled = true;
+    resetExportAllButton.disabled = true;
+    const deletedSummary = trialBreakdown(gameLog);
+    resetDialog.close();
+    try {
+      // Drain all earlier writes before clearing so an old event cannot
+      // repopulate storage after the user confirms deletion.
+      await saveQueue;
+      if (storageMode === "indexeddb") {
+        await new Promise((resolve, reject) => {
+          const tx = database.transaction(["rows", "meta"], "readwrite");
+          tx.oncomplete = resolve;
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error);
+          tx.objectStore("rows").clear();
+          tx.objectStore("meta").put({ key: "session", activeId: "", exportedCounts: {}, savedAt: Date.now() });
+        });
+      }
+      // Prevent a stale fallback from resurrecting deleted rows on reload.
+      // localStorage is the primary store when IndexedDB is unavailable.
+      localStorage.removeItem(FALLBACK_KEY);
+      gameLog.length = 0;
+      activeId = "";
+      exportedCounts = {};
+      playerIdInput.value = "";
+      resumeAfterDialog = false;
+      prepareGame();
+      updateLogControls();
+      document.getElementById("data-management").open = false;
+      showConfirmation("Game reset", `Deleted saved trials:\n${deletedSummary}\n\nThe board and player ID have been cleared.`);
+    } catch (error) {
+      console.error("Unable to complete reset:", error);
+      setFeedback("Reset failed. Saved logs could not be safely cleared. Please retry.");
+      // The reset was not completed; returning to an active tab restores the game.
+    } finally {
+      resetInProgress = false;
+      resetConfirmButton.disabled = false;
+      resetExportAllButton.disabled = false;
+      updateLogControls();
+      restoreAfterDialog();
+    }
+  }
+
+  resetConfirmButton.addEventListener("click", confirmFullReset);
+  resetExportAllButton.addEventListener("click", exportAllLogs);
+  document.querySelector("#reset-cancel").addEventListener("click", () => resetDialog.close());
+  resetDialog.addEventListener("cancel", (event) => {
+    if (resetInProgress) event.preventDefault();
+  });
+  switchIdButton.addEventListener("click", requestSwitch);
+  switchConfirmButton.addEventListener("click", confirmSwitch);
+  document.querySelector("#switch-cancel").addEventListener("click", () => switchDialog.close());
+
   document.addEventListener("keydown", (event) => {
+    // Allow native Escape-to-close behavior while a confirmation dialog is open.
+    if (resetDialog.open || switchDialog.open || confirmationDialog.open) return;
     // Typing in the ID field must not move, rotate or pause the game.
     if (event.target instanceof Element &&
         event.target.closest("input, textarea, select, [contenteditable]")) return;
@@ -603,13 +1028,16 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.addEventListener("keyup", (event) => stopKeyRepeat(event.code));
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) pauseGame();
+    if (document.hidden) pauseGame("tab_hidden");
   });
-  window.addEventListener("blur", pauseGame);
+  window.addEventListener("blur", () => pauseGame("window_inactive"));
   startButton.addEventListener("click", toggleStartPause);
-  resetButton.addEventListener("click", resetGame);
+  resetButton.addEventListener("click", requestReset);
   exportButton.addEventListener("click", exportGameLog);
-  playerIdInput.addEventListener("input", () => { exportFeedback.textContent = ""; });
+  playerIdInput.addEventListener("input", () => {
+    setFeedback("");
+    updateLogControls();
+  });
 
   // Show full instructions on larger screens; collapse them on small viewports
   // to keep the board and controls visible without scrolling.
@@ -620,5 +1048,6 @@ document.addEventListener("DOMContentLoaded", () => {
     instructions.open = event.matches;
   });
 
-  resetGame();
+  prepareGame();
+  initializeStorage();
 });

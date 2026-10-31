@@ -11,7 +11,8 @@
   <div class="game-shell">
     <h1>Let's play Tetris!</h1>
 
-    <section class="stats" aria-label="Game statistics">
+    <!-- Layer 1: game status and statistics -->
+    <section class="stats layer-one" aria-label="Game statistics">
       <div class="stat status" id="status-panel" data-state="ready" role="status" aria-live="polite">
         <span class="stat-label">Game status</span><span class="stat-value" id="status">Ready</span>
       </div>
@@ -22,47 +23,96 @@
       <div class="stat"><span class="stat-label">Time</span><span class="stat-value" id="time">00:00</span></div>
     </section>
 
-    <div class="game-functions">
-      <button type="button" id="start-button">Start</button>
-      <button type="button" id="reset-button">Reset game</button>
-      <div class="export-group">
-        <label for="player-id">ID</label>
-        <input type="text" id="player-id" name="player-id" placeholder="e.g. P001"
-               maxlength="50" autocomplete="off" spellcheck="false"
-               aria-describedby="export-feedback">
-        <button type="button" id="export-button" disabled>Export game log (CSV)</button>
+    <!-- Layer 2: ID/export (left), gameplay controls (right) -->
+    <section class="controls-row layer-two" aria-label="Game controls">
+      <div class="control-card export-card">
+        <div class="export-group">
+          <label for="player-id">Player ID</label>
+          <input type="text" id="player-id" name="player-id" placeholder="e.g. P001"
+                 maxlength="50" autocomplete="off" spellcheck="false"
+                 aria-describedby="export-feedback storage-notice">
+          <button type="button" id="switch-id-button" title="Change player without deleting saved trials" disabled>Switch ID</button>
+          <button type="button" id="export-button" aria-label="Export current ID game log as CSV" disabled>Export CSV</button>
+        </div>
       </div>
-    </div>
-    <p id="export-feedback" class="export-feedback" role="status" aria-live="polite"></p>
+      <div class="control-card action-card">
+        <button type="button" id="start-button">Start</button>
+        <button type="button" id="reset-button">Reset game</button>
+      </div>
+    </section>
+
+    <!-- Layer 3: validation and failure messages appear here. -->
+    <p id="export-feedback" class="export-feedback layer-three" role="status" aria-live="polite"></p>
 
     <main class="game-layout">
-      <div id="game-grid" class="game-grid" role="img" aria-label="Tetris playing field: 10 columns and 20 rows"></div>
+      <section class="play-area" aria-label="Tetris board and previews">
+        <div id="game-grid" class="game-grid" role="img" aria-label="Tetris playing field: 10 columns and 20 rows"></div>
+        <div class="side-panel">
+          <section class="preview-wrap" aria-label="Next piece">
+            <h2>Next</h2>
+            <div id="next-grid" class="preview" aria-hidden="true"></div>
+          </section>
+          <section class="preview-wrap" aria-label="Held piece">
+            <h2>Hold</h2>
+            <div id="hold-grid" class="preview" aria-hidden="true"></div>
+          </section>
+        </div>
+      </section>
 
-      <div class="side-panel">
-        <section class="preview-wrap" aria-label="Next piece">
-          <h2>Next</h2>
-          <div id="next-grid" class="preview" aria-hidden="true"></div>
-        </section>
-        <section class="preview-wrap" aria-label="Held piece">
-          <h2>Hold</h2>
-          <div id="hold-grid" class="preview" aria-hidden="true"></div>
-        </section>
-      </div>
+      <aside class="help-panel">
+        <details class="data-management" id="data-management">
+          <summary id="log-summary">Saved trials: 0</summary>
+          <div class="data-details">
+            <span id="storage-notice">Checking saved logs…</span>
+            <span>Reset clears saved trials for every ID. Export any data you need first.</span>
+          </div>
+        </details>
 
-      <details class="instructions" id="game-instructions" aria-labelledby="instructions-title">
-        <summary id="instructions-title">Instructions</summary>
-        <ul>
-          <li><kbd>←</kbd> <kbd>→</kbd> Move</li>
-          <li><kbd>↓</kbd> Soft drop</li>
-          <li><kbd>↑</kbd> or <kbd>X</kbd> Rotate clockwise</li>
-          <li><kbd>Z</kbd> Rotate counterclockwise</li>
-          <li><kbd>Space</kbd> Hard drop</li>
-          <li><kbd>C</kbd> or <kbd>Shift</kbd> Hold piece</li>
-          <li><kbd>P</kbd> or <kbd>Esc</kbd> Pause / resume</li>
-        </ul>
-        <p>The game pauses when you switch away from its window. Complete lines to increase your score and level.</p>
-      </details>
+        <details class="instructions" id="game-instructions" aria-labelledby="instructions-title">
+          <summary id="instructions-title">Instructions</summary>
+          <ul>
+            <li><kbd>←</kbd> <kbd>→</kbd> Move</li>
+            <li><kbd>↓</kbd> Soft drop</li>
+            <li><kbd>↑</kbd> or <kbd>X</kbd> Rotate clockwise</li>
+            <li><kbd>Z</kbd> Rotate counterclockwise</li>
+            <li><kbd>Space</kbd> Hard drop</li>
+            <li><kbd>C</kbd> or <kbd>Shift</kbd> Hold piece</li>
+            <li><kbd>P</kbd> or <kbd>Esc</kbd> Pause / resume</li>
+          </ul>
+          <p>The game pauses when you switch away from its window. Complete lines to increase your score and level.</p>
+        </details>
+      </aside>
     </main>
   </div>
+
+  <dialog id="reset-dialog" class="action-dialog" aria-labelledby="reset-title" aria-describedby="reset-description">
+    <h2 id="reset-title">Are you sure you want to reset the game?</h2>
+    <p id="reset-description">This will permanently clear saved trials for every player ID, reset the board, and clear the current ID. It cannot be undone.</p>
+    <p class="dialog-data-label">Saved trials to be deleted:</p>
+    <p id="reset-data-summary" class="dialog-data-summary">No saved trials</p>
+    <div class="dialog-choices">
+      <button type="button" id="reset-export-all" class="backup-button">Export CSV file</button>
+      <button type="button" id="reset-confirm" class="destructive-button">Reset and delete all logs</button>
+      <button type="button" id="reset-cancel">Cancel</button>
+    </div>
+  </dialog>
+
+  <dialog id="switch-dialog" class="action-dialog" aria-labelledby="switch-title" aria-describedby="switch-description">
+    <h2 id="switch-title">Switch player ID?</h2>
+    <p id="switch-description">The current trial will end if it is in progress. All saved trials will be preserved.</p>
+    <p id="switch-data-summary" class="dialog-data-summary"></p>
+    <div class="dialog-choices">
+      <button type="button" id="switch-confirm" class="action-primary">Switch player ID</button>
+      <button type="button" id="switch-cancel">Cancel</button>
+    </div>
+  </dialog>
+
+  <!-- Success acknowledgement: dismiss with Esc or × only. -->
+  <dialog id="confirmation-dialog" class="action-dialog success-dialog"
+          aria-labelledby="confirmation-title" aria-describedby="confirmation-details">
+    <button type="button" id="confirmation-close" class="confirmation-close" aria-label="Dismiss notification" title="Close">×</button>
+    <h2 id="confirmation-title">Completed</h2>
+    <p id="confirmation-details"></p>
+  </dialog>
 </body>
 </html>
