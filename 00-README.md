@@ -1,35 +1,57 @@
-# Tetris
+TETRIS EXPERIMENT (ACTIVE PLAYTIME = 7 minutes)
+================================================
 
-## Start playing
+FILES
+-----
+Click to Play Tetris.html. Open this page in Chrome or Edge. Keep these three files (01-app.js, 02-style.css, and Click to Play Tetris.html  in the same folder. No Internet connection is needed.
 
-## How to play
-Keep `Click to Play Tetris.html`, `01-app.js`, and `02-style.css` in the same folder. Open the HTML file in a modern browser. Enter a **Player ID**, then select **Start**. At game over, select **New game** to continue with the same ID.
+PARTICIPANT FLOW
+----------------
+1. Enter a participant ID and select Start Game.
+2. Play Tetris. When Game Over occurs, the active-play timer
+   automatically pauses. Select New Game to resume the SAME timer and PID.
+3. Leaving the browser tab/window or manually pausing stops the timer.
+   On returning, select Resume (it does not auto-resume).
+4. At 07:00 of accumulated active gameplay, the board freezes with
+   Trial over status. Further play requires resetting the active session.
+5. Export CSV for the active PID, or use Reset game > Download all CSV &
+   Reset for a CSV containing records from all retained PIDs.
+6. Reset clears the PID, board, and trial timer, but retains historical
+   records in browser storage.
 
-## Controls
+EXPORTED CSV: EXACTLY 12 COLUMNS (IN ORDER)
+-------------------------------------------
+1. ID
+2. Trial
+3. Game
+4. Game within trial
+5. Status
+6. Game status cutoff
+7. Trial Time (active trial in minutes)
+8. Time (active trial in seconds)
+9. Score
+10. Lines
+11. Level
+12. Number of pieces placed
 
-- **Left / right arrows**: Move pieces sideways
-- **Down arrow**: Drop faster
-- **Up arrow / X**: Rotate clockwise
-- **Z**: Rotate counterclockwise
-- **Space**: Instantly drop a piece
-- **C / Shift**: Hold or swap pieces
-- **P**: Pause or resume (when enabled)
-
-## Logs and trial numbering
-- Events and one-second snapshots are saved in browser storage where permitted.
-- The **Saved trials** counter shows the number of distinct player-ID/game-number combinations.
-- **Export CSV** exports all recorded trials for the current Player ID.
-- The filename is `Tetris_game_log_YYYY-MM-DD_HH-mm-ss_ID.csv`.
-- The optional **Export all IDs to CSV first** action in the Reset dialog creates a combined backup before deletion. It does not reset anything by itself.
-- The export/reset feedback message disappears after three seconds.
-
-## Important: Reset is destructive
-**Reset game** opens a confirmation dialog. You must type `RESET` to confirm. It clears the board, Player ID, and *all* previously saved log records for *every* ID in this game's browser storage. This is permanent; export CSV backups before confirming. Closing or cancelling the dialog leaves the collected logs intact.
-
-Use **New game** after Game over when you wish to retain the Player ID and all existing logs.
-
-## Storage notes
-Local browser storage may be deleted by browser settings, private browsing, or file-origin restrictions. Export CSV files regularly, and verify downloads exist before clearing logs. No information is sent to a server by this local game.
-
-###
-Note: Game functionality updates after 10/25/2026 were made with the help of ChatGPT.
+COLUMN INTERPRETATION
+---------------------
+* Trial: numbered trial for a given participant, starting at 1.
+* Game: sequential game number for that PID across all its trials.
+* Game within trial: 1, 2, 3 ... and resets when a new trial begins.
+* Status: Playing, Paused, Game over, or Trial over. There is one
+  exported row per meaningful status transition (start, resume, pause,
+  game over, and final trial cutoff). Routine actions, one-second
+  snapshots, and internal export/recovery events are NOT exported.
+* Game status cutoff: Game over on an individual game's Game over row;
+  Playing on the Trial over row when the seven-minute cutoff interrupts
+  an active game. Blank for nonterminal status-transition rows. Because
+  the clock pauses at Game over, a completed trial normally has Playing
+  as its final game status cutoff.
+* Trial Time (active trial in minutes): decimal MINUTES, to 3 places.
+  For example, 01:30 is 1.500 minutes; 07:00 is 7.000 minutes.
+* Time (active trial in seconds): decimal SECONDS, to 2 places.
+  For example, 01:30 is 90.00 seconds; 07:00 is 420.00 seconds.
+* Score, Lines, Level, Number of pieces placed: current GAME's values
+  at that transition, NOT totals over all games. The board and these
+  counters reset on New game.

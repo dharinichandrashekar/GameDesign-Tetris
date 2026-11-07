@@ -67,6 +67,7 @@ h1 {
 .status[data-state="playing"] { background: #74b4e6; }
 .status[data-state="paused"] { background: #ffe693; }
 .status[data-state="over"] { background: #ff4d4d; color: white; }
+.status[data-state="trial_over"] { background: #ffd166; color: #171717; }
 .controls-row {
   display: flex;
   flex-wrap: wrap;
@@ -484,3 +485,8 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   .export-group { flex-wrap: wrap; }
   .export-card { min-height: 58px; }
 }
+
+/* Experimental active-play clock: clearly distinguish game-over from a running timer. */
+#time { font-variant-numeric: tabular-nums; }
+.status[data-state="over"] { background: #ff4d4d; color: white; }
+.status[data-state="paused"] { background: #ffe693; }

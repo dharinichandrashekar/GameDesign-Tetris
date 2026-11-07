@@ -20,7 +20,7 @@
       <div class="stat"><span class="stat-label">Lines</span><span class="stat-value" id="lines">0</span></div>
       <div class="stat"><span class="stat-label">Level</span><span class="stat-value" id="level">1</span></div>
       <div class="stat"><span class="stat-label">Pieces</span><span class="stat-value" id="pieces">0</span></div>
-      <div class="stat"><span class="stat-label">Time</span><span class="stat-value" id="time">00:00</span></div>
+      <div class="stat"><span class="stat-label">Active play (07:00 max)</span><span class="stat-value" id="time">00:00</span></div>
     </section>
 
     <!-- Layer 2: ID/export (left), gameplay controls (right) -->
@@ -32,11 +32,11 @@
                  maxlength="50" autocomplete="off" spellcheck="false"
                  aria-describedby="export-feedback storage-notice">
           <button type="button" id="switch-id-button" title="Change player without deleting saved trials" disabled>Switch ID</button>
-          <button type="button" id="export-button" aria-label="Export current ID game log as CSV" disabled>Export CSV</button>
+          <button type="button" id="export-button" aria-label="Export current player 12-column research CSV" disabled>Export CSV</button>
         </div>
       </div>
       <div class="control-card action-card">
-        <button type="button" id="start-button">Start</button>
+        <button type="button" id="start-button">Start Game</button>
         <button type="button" id="reset-button">Reset game</button>
       </div>
     </section>
@@ -64,7 +64,7 @@
           <summary id="log-summary">Saved trials: 0</summary>
           <div class="data-details">
             <span id="storage-notice">Checking saved logs…</span>
-            <span>Reset clears saved trials for every ID. Export any data you need first.</span>
+            <span>Reset clears the player ID, board and 7-minute timer. Previously saved logs are retained.</span>
           </div>
         </details>
 
@@ -79,27 +79,28 @@
             <li><kbd>C</kbd> or <kbd>Shift</kbd> Hold piece</li>
             <li><kbd>P</kbd> or <kbd>Esc</kbd> Pause / resume</li>
           </ul>
-          <p>The game pauses when you switch away from its window. Complete lines to increase your score and level.</p>
+          <p><strong>Trial:</strong> 7 minutes from Start Game. If Game over occurs, your timer pauses. Click New game to resume the remaining active-play time. Your player ID and progress on the trial clock are retained.</p>
+          <p>Manual pause, Game over, switching tabs/windows, and dialogs all <strong>pause the 7-minute active-play timer</strong>. After returning to this tab, click Resume. The trial automatically ends after 07:00 of active gameplay; export the CSV when it finishes.</p>
         </details>
       </aside>
     </main>
   </div>
 
   <dialog id="reset-dialog" class="action-dialog" aria-labelledby="reset-title" aria-describedby="reset-description">
-    <h2 id="reset-title">Are you sure you want to reset the game?</h2>
-    <p id="reset-description">This will permanently clear saved trials for every player ID, reset the board, and clear the current ID. It cannot be undone.</p>
-    <p class="dialog-data-label">Saved trials to be deleted:</p>
+    <h2 id="reset-title">Reset the current game and participant?</h2>
+    <p id="reset-description">This resets the player ID, board, and active-play timer. An unfinished trial is marked interrupted. Previously saved logs remain in this browser. The download option initiates a CSV download, then immediately resets; browsers cannot confirm that a file finished saving.</p>
+    <p class="dialog-data-label">Saved trial logs that will be retained:</p>
     <p id="reset-data-summary" class="dialog-data-summary">No saved trials</p>
     <div class="dialog-choices">
-      <button type="button" id="reset-export-all" class="backup-button">Export CSV file</button>
-      <button type="button" id="reset-confirm" class="destructive-button">Reset and delete all logs</button>
+      <button type="button" id="reset-export-all" class="backup-button">Download all CSV &amp; Reset</button>
+      <button type="button" id="reset-confirm" class="destructive-button">Reset without download</button>
       <button type="button" id="reset-cancel">Cancel</button>
     </div>
   </dialog>
 
   <dialog id="switch-dialog" class="action-dialog" aria-labelledby="switch-title" aria-describedby="switch-description">
     <h2 id="switch-title">Switch player ID?</h2>
-    <p id="switch-description">The current trial will end if it is in progress. All saved trials will be preserved.</p>
+    <p id="switch-description">If a trial is running, it will end early. A new player starts a fresh 7-minute trial. All saved logs are preserved.</p>
     <p id="switch-data-summary" class="dialog-data-summary"></p>
     <div class="dialog-choices">
       <button type="button" id="switch-confirm" class="action-primary">Switch player ID</button>

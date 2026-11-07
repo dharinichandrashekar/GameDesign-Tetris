@@ -2,13 +2,14 @@
 
 document.addEventListener("DOMContentLoaded", () => {
   const WIDTH = 10;
+  const TRIAL_DURATION_MS = 7 * 60 * 1000; // Seven minutes of active play, excluding pauses.
   const HEIGHT = 20;
   const LOCK_DELAY_MS = 500;
   const MAX_LOCK_RESETS = 15;
   const DAS_MS = 170;
   const ARR_MS = 50;
   const PIECE_NAMES = ["L", "J", "O", "I", "T", "S", "Z"];
-  const STATUS_LABELS = { ready: "Ready", playing: "Playing", paused: "Paused", over: "Game over" };
+  const STATUS_LABELS = { ready: "Ready", playing: "Playing", paused: "Paused", over: "Game over", trial_over: "Trial over" };
   const COLORS = ["#ff9f1c", "#287de1", "#ffd500", "#00c8df", "#a453d8", "#44c36d", "#e54a4a"];
   // Tetromino indices: L, J, O, I, T, S, Z.
 
@@ -121,11 +122,22 @@ document.addEventListener("DOMContentLoaded", () => {
   let displayTimer = null;
   let lockTimer = null;
   let lockResets = 0;
-  let elapsedBeforePause = 0;
-  let runningSince = 0;
+  // The clock accumulates ONLY active gameplay. performance.now() measures
+  // each active segment; Date.now() separately measures total wall time.
+  let trialStartedAtMs = 0;
+  let trialFinishedAtMs = 0;
+  let trialActiveAccumulatedMs = 0;
+  let gameActiveAccumulatedMs = 0;
+  let activeSegmentStartedAtPerf = 0;
+  let pauseStartedAtMs = 0;
+  let pauseReason = "";
+  let pauseCount = 0;
+  let trialNumber = 0;
+  let gameInTrial = 0;
+  let gameStartedAtMs = 0;
+  let gameEndedAtMs = 0;
   const heldKeys = new Map();
-  // Each event stores its original ID and game number. New game preserves logs;
-  // confirmed Reset clears logs for every ID. IndexedDB is preferred.
+  // Events are retained across new games and non-destructive resets.
   const gameLog = [];
   let gameNumber = 0;
   let activeId = "";
@@ -137,19 +149,19 @@ document.addEventListener("DOMContentLoaded", () => {
   let saveQueue = Promise.resolve();
   let lastSnapshotSecond = 0;
   let resetInProgress = false;
-  let resumeAfterDialog = false;
 
   // Inline messages are reserved for validation and failed exports/storage writes.
   function setFeedback(message) {
     exportFeedback.textContent = message;
   }
 
-  // Shared, per-ID counts used in reset preview, exports and acknowledgements.
+  // Shared, per-ID trial counts used in previews, exports and acknowledgements.
   function trialBreakdown(rows = gameLog) {
     const counts = new Map();
     for (const row of rows) {
       if (!counts.has(row.id)) counts.set(row.id, new Set());
-      counts.get(row.id).add(row.game);
+      // Legacy exports did not include a trial number; treat them as one legacy session.
+      counts.get(row.id).add(Number.isInteger(row.trial) ? row.trial : "legacy");
     }
     return [...counts].sort(([a], [b]) => a.localeCompare(b))
       .map(([id, trials]) => `ID: ${id}, trials: ${trials.size}`)
@@ -160,19 +172,10 @@ document.addEventListener("DOMContentLoaded", () => {
     return document.visibilityState === "visible" && document.hasFocus();
   }
 
-  // UI dialogs suspend the clock without producing artificial paused/resumed events.
-  function suspendForDialog() {
-    if (state === "playing") {
-      resumeAfterDialog = true;
-      pauseGame("dialog", false);
-    }
-  }
-
-  function restoreAfterDialog() {
-    if (resetDialog.open || switchDialog.open || confirmationDialog.open || resetInProgress) return;
-    const shouldResume = resumeAfterDialog;
-    resumeAfterDialog = false;
-    if (shouldResume && state === "paused" && pageIsActive()) resumeGame(false);
+  // Entering a modal pauses active-play time, just like a manual pause.
+  // Closing a modal NEVER automatically restarts gameplay.
+  function suspendForDialog(reason = "dialog") {
+    if (state === "playing") pauseGame(reason);
   }
 
   function showConfirmation(title, details) {
@@ -184,13 +187,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!confirmationDialog.open) confirmationDialog.showModal();
   }
 
-  confirmationDialog.addEventListener("close", () => {
-    restoreAfterDialog();
-  });
   confirmationCloseButton.addEventListener("click", () => confirmationDialog.close());
   // Native Esc cancellation closes this notification; no extra confirmation needed.
-  resetDialog.addEventListener("close", restoreAfterDialog);
-  switchDialog.addEventListener("close", restoreAfterDialog);
 
   const DB_NAME = "tetris_saved_game_logs_v1";
   const FALLBACK_KEY = "tetris_saved_game_logs_fallback_v1";
@@ -213,16 +211,15 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function updateLogControls() {
-    const id = activeId || playerIdInput.value.trim();
-    const logs = id ? idRows(id) : [];
-    const totalGames = new Set(gameLog.map((row) => `${row.id}\u0000${row.game}`)).size;
-    // Allow invalid requests to display the requested inline guidance.
-    startButton.disabled = !storageReady || resetInProgress;
+    const totalTrials = new Set(gameLog.map((row) => `${row.id}\u0000${Number.isInteger(row.trial) ? row.trial : "legacy"}`)).size;
+    // Trial over is terminal; Reset game is required for a new trial.
+    startButton.disabled = !storageReady || resetInProgress || state === "trial_over";
+    resetButton.disabled = !storageReady || resetInProgress;
     exportButton.disabled = !storageReady || resetInProgress;
     playerIdInput.readOnly = Boolean(activeId);
     playerIdInput.title = activeId ? "ID is locked. Use Switch ID to change players without deleting logs." : "Enter an ID to begin.";
     switchIdButton.disabled = !storageReady || !activeId || resetInProgress;
-    logSummary.textContent = `Saved trials: ${totalGames}`;
+    logSummary.textContent = `Saved trials: ${totalTrials}`;
     storageNotice.textContent = storageProblem || (storageMode === "indexeddb" ? "Auto-saved in this browser" :
       storageMode === "localstorage" ? "Auto-saved in browser storage (limited capacity)" : "Not saved to disk: export regularly");
   }
@@ -244,7 +241,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  // Every event is written in order. The destructive reset drains this queue.
+  // Write each event in order. Session resets preserve historical events.
   function enqueueSave(row = null) {
     if (!storageReady) return;
     if (storageMode === "localstorage") {
@@ -306,15 +303,36 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function closeInterruptedGames() {
-    const lastPerGame = new Map();
-    const completedGames = new Set();
+    // An unfinished GAME is not necessarily an unfinished TRIAL: participants
+    // may be sitting at "Game over" while their seven-minute clock still runs.
+    const lastPerTrial = new Map();
+    const closedTrials = new Set();
+    const legacyLastPerGame = new Map();
+    const closedLegacyGames = new Set();
     for (const row of gameLog) {
-      const gameKey = `${row.id}\u0000${row.game}`;
-      lastPerGame.set(gameKey, row);
-      if (["game_over", "game_reset", "interrupted_reload", "interrupted_switch"].includes(row.event)) completedGames.add(gameKey);
+      if (Number.isInteger(row.trial) && row.trial > 0) {
+        const key = `${row.id}\u0000${row.trial}`;
+        lastPerTrial.set(key, row);
+        if (["trial_over", "trial_interrupted", "interrupted_reload"].includes(row.event)) closedTrials.add(key);
+      } else {
+        const key = `${row.id}\u0000${row.game}`;
+        legacyLastPerGame.set(key, row);
+        if (["game_over", "game_reset", "interrupted_reload", "interrupted_switch"].includes(row.event)) closedLegacyGames.add(key);
+      }
     }
-    for (const [gameKey, row] of lastPerGame) {
-      if (completedGames.has(gameKey)) continue;
+    for (const [key, row] of lastPerTrial) {
+      if (closedTrials.has(key)) continue;
+      const interrupted = {
+        ...row, timestamp_utc: new Date().toISOString(), event: "trial_interrupted",
+        status: "Interrupted", game_status_at_cutoff: "",
+        details: "Page was reloaded or closed before the seven-minute trial ended",
+      };
+      gameLog.push(interrupted);
+      enqueueSave(interrupted);
+    }
+    // Older logs did not have a separate trial identifier.
+    for (const [key, row] of legacyLastPerGame) {
+      if (closedLegacyGames.has(key)) continue;
       const interrupted = {
         ...row, timestamp_utc: new Date().toISOString(), event: "interrupted_reload",
         status: "Interrupted", details: "Page was reloaded or closed before the game finished",
@@ -375,85 +393,235 @@ document.addEventListener("DOMContentLoaded", () => {
     updateLogControls();
   }
 
-  function logEvent(event, details = "", statusOverride = "") {
-    if (!activeId || gameNumber === 0) return;
+  function trialIsRunning() {
+    return trialStartedAtMs > 0 && trialFinishedAtMs === 0;
+  }
+
+  function elapsedMs() {
+    const inProgress = state === "playing" && activeSegmentStartedAtPerf > 0
+      ? Math.max(0, performance.now() - activeSegmentStartedAtPerf) : 0;
+    return Math.min(TRIAL_DURATION_MS, trialActiveAccumulatedMs + inProgress);
+  }
+
+  function gameActiveMs() {
+    const inProgress = state === "playing" && activeSegmentStartedAtPerf > 0
+      ? Math.max(0, performance.now() - activeSegmentStartedAtPerf) : 0;
+    return gameActiveAccumulatedMs + inProgress;
+  }
+
+  function wallElapsedMs() {
+    if (!trialStartedAtMs) return 0;
+    return Math.max(0, (trialFinishedAtMs || Date.now()) - trialStartedAtMs);
+  }
+
+  function accumulateActiveTime() {
+    if (state === "playing" && activeSegmentStartedAtPerf > 0) {
+      const delta = Math.max(0, performance.now() - activeSegmentStartedAtPerf);
+      // Never credit active time beyond the experimental cutoff.
+      const credited = Math.min(delta, Math.max(0, TRIAL_DURATION_MS - trialActiveAccumulatedMs));
+      trialActiveAccumulatedMs += credited;
+      gameActiveAccumulatedMs += credited;
+      activeSegmentStartedAtPerf = 0;
+    }
+  }
+
+  function startActiveSegment() {
+    activeSegmentStartedAtPerf = Math.max(0.001, performance.now());
+  }
+
+  function closePauseInterval() {
+    if (!pauseStartedAtMs) return;
+    const duration = Math.max(0, Date.now() - pauseStartedAtMs);
+    logEvent("pause_ended", `${pauseReason}; pause duration ${(duration / 1000).toFixed(2)} seconds`);
+    pauseStartedAtMs = 0;
+    pauseReason = "";
+  }
+
+  function serializeBoard() {
+    // Ten characters per row, twenty rows; lower-case means active falling piece.
+    // This captures the full displayed board, not just score/lines.
+    const result = board.map((row) => row.map((type) => type === null ? "." : PIECE_NAMES[type]));
+    if (piece !== null) {
+      for (const { x, y } of cellsFor(piece)) {
+        if (x >= 0 && x < WIDTH && y >= 0 && y < HEIGHT) result[y][x] = PIECE_NAMES[piece.type].toLowerCase();
+      }
+    }
+    return result.map((row) => row.join("")).join("/");
+  }
+
+  function makeEventRow(event, details = "", statusOverride = "", options = {}) {
     const ms = elapsedMs();
-    const row = {
+    const wallMs = wallElapsedMs();
+    const gameEnd = gameEndedAtMs || (trialFinishedAtMs || Date.now());
+    const gameWallMs = gameStartedAtMs ? Math.max(0, gameEnd - gameStartedAtMs) : 0;
+    return {
       id: activeId,
+      trial: trialNumber,
       game: gameNumber,
-      timestamp_utc: new Date().toISOString(),
+      game_in_trial: gameInTrial,
+      trial_started_utc: new Date(trialStartedAtMs).toISOString(),
+      timestamp_utc: new Date(options.timestampMs || Date.now()).toISOString(),
       event,
       status: statusOverride || STATUS_LABELS[state],
+      game_status_at_cutoff: options.gameStatusAtCutoff || "",
       elapsed_mm_ss: formatElapsedTime(ms),
       elapsed_seconds: (ms / 1000).toFixed(2),
+      trial_wall_elapsed_seconds: (wallMs / 1000).toFixed(2),
+      trial_paused_seconds: (Math.max(0, wallMs - ms) / 1000).toFixed(2),
+      pause_count: pauseCount,
+      game_elapsed_seconds: (gameWallMs / 1000).toFixed(2),
+      game_active_seconds: (gameActiveMs() / 1000).toFixed(2),
       score,
       lines,
       level,
       pieces_placed: piecesPlaced,
       current_piece: piece === null ? "" : PIECE_NAMES[piece.type],
+      current_piece_x: piece === null ? "" : piece.x,
+      current_piece_y: piece === null ? "" : piece.y,
+      current_piece_rotation: piece === null ? "" : piece.rotation,
       next_piece: PIECE_NAMES[nextType],
       held_piece: heldType === null ? "" : PIECE_NAMES[heldType],
+      board_state: serializeBoard(),
       details,
     };
+  }
+
+  function appendEvent(row) {
     gameLog.push(row);
     enqueueSave(row);
     updateLogControls();
   }
 
+  function logEvent(event, details = "", statusOverride = "", options = {}) {
+    if (!activeId || gameNumber === 0) return;
+    appendEvent(makeEventRow(event, details, statusOverride, options));
+  }
+
+  function finishTrial() {
+    if (!trialIsRunning() || state !== "playing") return;
+    const statusAtCutoff = STATUS_LABELS[state];
+    accumulateActiveTime();
+    trialActiveAccumulatedMs = TRIAL_DURATION_MS;
+    gameEndedAtMs = Date.now();
+    trialFinishedAtMs = Date.now();
+    state = "trial_over";
+    stopTimers();
+    stopTrialClock();
+    render(); // Keep the board exactly as it was when time expired.
+    updateDisplay();
+    logEvent("trial_over", `Seven active-play minutes completed; ${gameInTrial} game(s) started`,
+      "Trial over", { gameStatusAtCutoff: statusAtCutoff });
+  }
+
+  function checkTrialDeadline() {
+    if (!trialIsRunning() || state !== "playing") return false;
+    if (elapsedMs() < TRIAL_DURATION_MS) return false;
+    finishTrial();
+    return true;
+  }
+
+  // Research CSV: exactly twelve requested variables. The in-browser event
+  // history remains detailed for persistence and recovery, but exported rows
+  // represent meaningful game/trial status changes rather than every action
+  // or the once-per-second snapshots. The event itself is not a CSV column.
+  const CSV_COLUMNS = [
+    ["ID", "id"],
+    ["Trial", "trial"],
+    ["Game", "game"],
+    ["Game within trial", "game_in_trial"],
+    ["Status", "export_status"],
+    ["Game status cutoff", "export_game_status_cutoff"],
+    ["Trial Time (active trial in minutes)", "export_trial_minutes"],
+    ["Time (active trial in seconds)", "export_trial_seconds"],
+    ["Score", "score"],
+    ["Lines", "lines"],
+    ["Level", "level"],
+    ["Number of pieces placed", "pieces_placed"],
+  ];
+
+  const CSV_STATUS_EVENTS = {
+    started: "Playing",
+    resumed: "Playing",
+    paused: "Paused",
+    game_over: "Game over",
+    trial_over: "Trial over",
+  };
+
+  function csvResearchRows(rows) {
+    return rows.flatMap((row) => {
+      const status = CSV_STATUS_EVENTS[row.event];
+      if (!status) return []; // Hide piece events, snapshots and internal metadata.
+      const seconds = Number(row.elapsed_seconds);
+      const activeSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+      // Game over is the end of an individual game. Trial over means the
+      // active game was stopped by the seven-minute trial cutoff.
+      const gameStatusCutoff = row.event === "game_over" ? "Game over" :
+        row.event === "trial_over"
+          ? (row.game_status_at_cutoff === "Game over" ? "Game over" : "Playing") : "";
+      return [{
+        ...row,
+        export_status: status,
+        export_game_status_cutoff: gameStatusCutoff,
+        export_trial_minutes: (activeSeconds / 60).toFixed(3),
+        export_trial_seconds: activeSeconds.toFixed(2),
+      }];
+    });
+  }
+
+  function downloadCSV(rows, filename) {
+    let url = null;
+    let link = null;
+    try {
+      const csvCell = (value) => {
+        const plain = String(value ?? "");
+        const safe = /^[\s]*[=+\-@]/.test(plain) ? `'${plain}` : plain;
+        return `"${safe.replaceAll('"', '""')}"`;
+      };
+      const researchRows = csvResearchRows(rows);
+      const csv = [CSV_COLUMNS.map(([name]) => csvCell(name)).join(","),
+        ...researchRows.map((row) => CSV_COLUMNS.map(([, key]) => csvCell(row[key])).join(","))
+      ].join("\r\n");
+      url = URL.createObjectURL(new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" }));
+      link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click(); // Browser APIs cannot confirm that a download finished saving.
+      return true;
+    } catch (error) {
+      console.error("CSV download could not start:", error);
+      return false;
+    } finally {
+      if (link) link.remove();
+      if (url) setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  }
+
+  function csvDateStamp() {
+    const now = new Date();
+    const pad2 = (n) => String(n).padStart(2, "0");
+    return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}_${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}`;
+  }
+
   function exportGameLog() {
+    checkTrialDeadline();
     const id = activeId || playerIdInput.value.trim();
-    const rows = idRows(id);
-    if (!id || !rows.length) {
+    if (!id || !idRows(id).length) {
       setFeedback("Enter an ID with saved game logs before exporting.");
       return false;
     }
-    // Export only the selected ID, using the ID frozen into each event at start.
-    // An ongoing game can be exported; any later events remain unexported.
-    logEvent("export_requested", "CSV download initiated");
-    const currentRows = idRows(id);
+    suspendForDialog("csv_export"); // An export must not consume active play time.
+    if (trialIsRunning()) logEvent("export_requested", "CSV download initiated");
+    const rows = idRows(id);
     const safeId = id.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "ID";
-    const columns = [
-      ["ID", "id"], ["Game", "game"], ["Timestamp (UTC)", "timestamp_utc"],
-      ["Event", "event"], ["Status", "status"],
-      ["Elapsed (MM:SS)", "elapsed_mm_ss"], ["Elapsed (seconds)", "elapsed_seconds"],
-      ["Score", "score"], ["Lines", "lines"], ["Level", "level"],
-      ["Pieces placed", "pieces_placed"], ["Current piece", "current_piece"],
-      ["Next piece", "next_piece"], ["Held piece", "held_piece"],
-      ["Details", "details"],
-    ];
-    const csvCell = (value) => {
-      const plain = String(value ?? "");
-      const safe = /^[\s]*[=+\-@]/.test(plain) ? `'${plain}` : plain;
-      return `"${safe.replaceAll('"', '""')}"`;
-    };
-    const csv = [columns.map(([name]) => csvCell(name)).join(","),
-      ...currentRows.map((row) => columns.map(([, key]) => csvCell(row[key])).join(","))
-    ].join("\r\n");
-    const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    const now = new Date();
-    const pad2 = (n) => String(n).padStart(2, "0");
-    const date = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
-    const time = `${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}`;
-    link.download = `Tetris_game_log_${date}_${time}_${safeId}.csv`;
-    document.body.appendChild(link);
-    try {
-      link.click();
-      exportedCounts[id] = currentRows.length;
-      enqueueSave();
-      showConfirmation("CSV export initiated", `${trialBreakdown(currentRows)}\n\nVerify the file downloaded.`);
-      return true;
-    } catch (error) {
-      setFeedback("Download was blocked. Try exporting again.");
-      console.error(error);
+    if (!downloadCSV(rows, `Tetris_game_log_${csvDateStamp()}_${safeId}.csv`)) {
+      setFeedback("Download could not be initiated. Retry Export CSV.");
       return false;
-    } finally {
-      link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      updateLogControls();
     }
+    exportedCounts[id] = rows.length;
+    enqueueSave();
+    showConfirmation("CSV download initiated", `${trialBreakdown(rows)}\n\nVerify that the file was saved. The game remains paused until you select Resume.`);
+    return true;
   }
 
   // Use unbiased, browser-provided cryptographic randomness for every shuffle.
@@ -544,10 +712,6 @@ document.addEventListener("DOMContentLoaded", () => {
     holdGrid.classList.toggle("used", holdUsed);
   }
 
-  function elapsedMs() {
-    return elapsedBeforePause + (state === "playing" ? performance.now() - runningSince : 0);
-  }
-
   function updateDisplay() {
     scoreDisplay.textContent = score.toLocaleString();
     linesDisplay.textContent = String(lines);
@@ -557,10 +721,11 @@ document.addEventListener("DOMContentLoaded", () => {
     statusDisplay.textContent = STATUS_LABELS[state];
     statusPanel.dataset.state = state;
     startButton.textContent = {
-      ready: "Start",
+      ready: "Start Game",
       playing: "Pause",
       paused: "Resume",
       over: "New game",
+      trial_over: "Trial over",
     }[state];
     if (storageReady) updateLogControls();
   }
@@ -571,7 +736,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function updateLockTimer(playerMoved = false) {
-    if (state !== "playing" || piece === null) return;
+    if (state !== "playing" || piece === null || checkTrialDeadline()) return;
     if (!isGrounded()) {
       clearLockTimer();
       return;
@@ -583,7 +748,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     lockTimer = setTimeout(() => {
       lockTimer = null;
-      if (state === "playing" && isGrounded()) lockPiece();
+      if (state === "playing" && !checkTrialDeadline() && isGrounded()) lockPiece();
     }, LOCK_DELAY_MS);
   }
 
@@ -614,12 +779,16 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function stopTimers() {
+    // Game physics only. The display clock is managed separately.
     clearInterval(gravityTimer);
-    clearInterval(displayTimer);
     gravityTimer = null;
-    displayTimer = null;
     clearLockTimer();
     stopAllKeyRepeats();
+  }
+
+  function stopTrialClock() {
+    clearInterval(displayTimer);
+    displayTimer = null;
   }
 
   function gravityMs() {
@@ -632,9 +801,14 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function startTimers() {
-    runningSince = performance.now();
     restartGravity();
+    updateLockTimer();
+  }
+
+  function startTrialClock() {
+    stopTrialClock();
     displayTimer = setInterval(() => {
+      if (checkTrialDeadline()) return;
       updateDisplay();
       const currentSecond = Math.floor(elapsedMs() / 1000);
       if (state === "playing" && currentSecond > lastSnapshotSecond) {
@@ -642,14 +816,17 @@ document.addEventListener("DOMContentLoaded", () => {
         logEvent("snapshot");
       }
     }, 100);
-    updateLockTimer();
   }
 
   function endGame(reason = "New piece could not spawn") {
-    if (state !== "playing") return;
-    elapsedBeforePause = elapsedMs();
+    if (state !== "playing" || checkTrialDeadline()) return;
+    accumulateActiveTime();
+    gameEndedAtMs = Date.now();
     state = "over";
-    stopTimers();
+    pauseStartedAtMs = Date.now();
+    pauseReason = "game_over";
+    pauseCount++;
+    stopTimers(); // Game over also pauses the seven-minute active-play clock.
     render();
     updateDisplay();
     logEvent("game_over", reason);
@@ -670,7 +847,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function lockPiece() {
-    if (state !== "playing" || piece === null) return;
+    if (state !== "playing" || piece === null || checkTrialDeadline()) return;
     clearLockTimer();
     const lockedType = piece.type;
     cellsFor(piece).forEach(({ x, y }) => { board[y][x] = piece.type; });
@@ -701,7 +878,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function moveDown(isSoftDrop) {
-    if (state !== "playing" || piece === null) return;
+    if (state !== "playing" || piece === null || checkTrialDeadline()) return;
     const candidate = { ...piece, y: piece.y + 1 };
     if (canPlace(candidate)) {
       piece = candidate;
@@ -715,7 +892,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function moveHorizontal(dx) {
-    if (state !== "playing" || piece === null) return;
+    if (state !== "playing" || piece === null || checkTrialDeadline()) return;
     const candidate = { ...piece, x: piece.x + dx };
     if (!canPlace(candidate)) return;
     piece = candidate;
@@ -724,7 +901,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function rotate(direction) {
-    if (state !== "playing" || piece === null) return;
+    if (state !== "playing" || piece === null || checkTrialDeadline()) return;
     const newRotation = (piece.rotation + direction + 4) % 4;
     const candidates = piece.type === 2 ? [[0, 0]] :
       (piece.type === 3 ? I_KICKS : KICKS)[`${piece.rotation}>${newRotation}`];
@@ -744,7 +921,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function hardDrop() {
-    if (state !== "playing" || piece === null) return;
+    if (state !== "playing" || piece === null || checkTrialDeadline()) return;
     let distance = 0;
     while (canPlace({ ...piece, y: piece.y + 1 })) {
       piece.y++;
@@ -756,7 +933,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function hold() {
-    if (state !== "playing" || piece === null || holdUsed) return;
+    if (state !== "playing" || piece === null || holdUsed || checkTrialDeadline()) return;
     clearLockTimer();
     const previousType = piece.type;
     if (heldType === null) {
@@ -778,10 +955,25 @@ document.addEventListener("DOMContentLoaded", () => {
     updateLockTimer();
   }
 
-  function prepareGame() {
+  function prepareGame(preserveTrial = false) {
     stopTimers();
-    lastSnapshotSecond = 0;
+    if (!preserveTrial) {
+      stopTrialClock();
+      trialStartedAtMs = 0;
+      trialFinishedAtMs = 0;
+      trialActiveAccumulatedMs = 0;
+      activeSegmentStartedAtPerf = 0;
+      pauseStartedAtMs = 0;
+      pauseReason = "";
+      pauseCount = 0;
+      trialNumber = 0;
+      gameInTrial = 0;
+      lastSnapshotSecond = 0;
+    }
     gameNumber = 0;
+    gameStartedAtMs = 0;
+    gameEndedAtMs = 0;
+    gameActiveAccumulatedMs = 0;
     board = Array.from({ length: HEIGHT }, () => Array(WIDTH).fill(null));
     bag = [];
     piece = newPiece(takePiece());
@@ -793,15 +985,14 @@ document.addEventListener("DOMContentLoaded", () => {
     level = 1;
     piecesPlaced = 0;
     lockResets = 0;
-    elapsedBeforePause = 0;
-    runningSince = 0;
     state = "ready";
     render();
     updateDisplay();
   }
 
   function startNewGame() {
-    if (!pageIsActive() || resetDialog.open || switchDialog.open || confirmationDialog.open) return;
+    if (!pageIsActive() || resetDialog.open || switchDialog.open || confirmationDialog.open ||
+        state === "trial_over") return;
     const requestedId = activeId || playerIdInput.value.trim();
     if (!requestedId) {
       setFeedback("Enter an ID before starting a game.");
@@ -810,20 +1001,43 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     if (!activeId) activeId = requestedId;
     playerIdInput.value = activeId;
+    if (!trialIsRunning()) {
+      trialNumber = idRows(activeId).reduce((max, row) =>
+        Math.max(max, Number.isInteger(row.trial) ? row.trial : 1), 0) + 1;
+      trialStartedAtMs = Date.now();
+      trialFinishedAtMs = 0;
+      trialActiveAccumulatedMs = 0;
+      activeSegmentStartedAtPerf = 0;
+      pauseStartedAtMs = 0;
+      pauseReason = "";
+      pauseCount = 0;
+      gameInTrial = 0;
+      lastSnapshotSecond = 0;
+    }
+    if (checkTrialDeadline()) return;
     gameNumber = idRows(activeId).reduce((max, row) => Math.max(max, row.game), 0) + 1;
+    gameInTrial++;
+    gameStartedAtMs = Date.now();
+    gameEndedAtMs = 0;
+    gameActiveAccumulatedMs = 0;
     state = "playing";
+    startActiveSegment();
     startTimers();
+    if (displayTimer === null) startTrialClock();
     render();
-    logEvent("started");
+    logEvent("started", gameInTrial === 1 ? "Trial started" : "New game within existing trial");
     updateDisplay();
     updateLogControls();
     setFeedback("");
   }
 
   function pauseGame(reason = "manual", record = true) {
-    if (state !== "playing") return;
-    elapsedBeforePause = elapsedMs();
+    if (state !== "playing" || checkTrialDeadline()) return;
+    accumulateActiveTime();
     state = "paused";
+    pauseStartedAtMs = Date.now();
+    pauseReason = reason;
+    pauseCount++;
     stopTimers();
     updateDisplay();
     if (record) logEvent("paused", reason);
@@ -832,7 +1046,9 @@ document.addEventListener("DOMContentLoaded", () => {
   function resumeGame(record = true) {
     if (state !== "paused" || !pageIsActive() || resetInProgress ||
         resetDialog.open || switchDialog.open || confirmationDialog.open) return;
+    closePauseInterval();
     state = "playing";
+    startActiveSegment();
     startTimers();
     render();
     updateDisplay();
@@ -840,7 +1056,11 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function toggleStartPause() {
-    if (state === "over") prepareGame();
+    if (checkTrialDeadline() || state === "trial_over") return;
+    if (state === "over") {
+      closePauseInterval(); // Log game-over wait time against the previous game.
+      prepareGame(true);   // Keep the ID and accumulated seven-minute clock.
+    }
     if (state === "ready") startNewGame();
     else if (state === "paused") resumeGame();
     else if (state === "playing") pauseGame();
@@ -868,11 +1088,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function confirmSwitch() {
     if (!switchDialog.open) return;
-    // A mid-trial switch ends that trial without deleting any past events.
-    if (gameNumber && (state === "paused" || state === "playing")) {
-      logEvent("interrupted_switch", "Player ID changed; trial ended early", "Interrupted");
+    // A mid-trial switch interrupts the trial; previous events remain saved.
+    if (!checkTrialDeadline() && trialIsRunning() && gameNumber) {
+      logEvent("trial_interrupted", "Player ID changed before the 7-minute cutoff", "Interrupted");
     }
-    resumeAfterDialog = false;
     activeId = "";
     playerIdInput.value = "";
     prepareGame();
@@ -882,104 +1101,66 @@ document.addEventListener("DOMContentLoaded", () => {
     playerIdInput.focus();
   }
 
-  function exportAllLogs() {
-    if (!gameLog.length) {
-      resetDialog.close();
-      setFeedback("No saved trials are available to export.");
-      return false;
-    }
-    const columns = [
-      ["ID", "id"], ["Game", "game"], ["Timestamp (UTC)", "timestamp_utc"],
-      ["Event", "event"], ["Status", "status"],
-      ["Elapsed (MM:SS)", "elapsed_mm_ss"], ["Elapsed (seconds)", "elapsed_seconds"],
-      ["Score", "score"], ["Lines", "lines"], ["Level", "level"],
-      ["Pieces placed", "pieces_placed"], ["Current piece", "current_piece"],
-      ["Next piece", "next_piece"], ["Held piece", "held_piece"], ["Details", "details"],
-    ];
-    const csvCell = (value) => {
-      const plain = String(value ?? "");
-      const safe = /^[\s]*[=+\-@]/.test(plain) ? `'${plain}` : plain;
-      return `"${safe.replaceAll('"', '""')}"`;
-    };
-    const csv = [columns.map(([name]) => csvCell(name)).join(","),
-      ...gameLog.map((row) => columns.map(([, key]) => csvCell(row[key])).join(","))
-    ].join("\r\n");
-    const url = URL.createObjectURL(new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" }));
-    const link = document.createElement("a");
-    const now = new Date();
-    const pad2 = (n) => String(n).padStart(2, "0");
-    const date = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
-    const time = `${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}`;
-    link.href = url;
-    link.download = `Tetris_Log_${date}_${time}_ALL_IDS.csv`;
-    document.body.appendChild(link);
-    try {
-      link.click();
-      for (const id of new Set(gameLog.map((row) => row.id))) exportedCounts[id] = idRows(id).length;
-      enqueueSave();
-      const summary = trialBreakdown(gameLog);
-      resetDialog.close();
-      showConfirmation("CSV export initiated", `${summary}\n\nVerify the backup downloaded.`);
-      return true;
-    } catch (error) {
-      resetDialog.close();
-      setFeedback("Backup export failed. Your saved logs have not been deleted.");
-      console.error(error);
-      return false;
-    } finally {
-      link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    }
+  function resetSession() {
+    activeId = "";
+    playerIdInput.value = "";
+    prepareGame(); // Reset participant, board and active timer. Retain all saved logs.
+    enqueueSave();
+    resetDialog.close();
+    updateLogControls();
+    document.getElementById("data-management").open = false;
   }
 
-  async function confirmFullReset() {
+  function exportAllLogsAndReset() {
+    if (resetInProgress || !resetDialog.open) return false;
+    if (!gameLog.length) {
+      resetDataSummary.textContent = "No saved trials to download. Use 'Reset without download' instead.";
+      return false;
+    }
+    resetInProgress = true;
+    resetConfirmButton.disabled = true;
+    resetExportAllButton.disabled = true;
+    // Include an interrupted-trial terminal row IN the exported CSV when
+    // resetting before seven active minutes. Commit only after click succeeds.
+    const interruptedRow = trialIsRunning() && gameNumber
+      ? makeEventRow("trial_interrupted", "Download CSV & Reset selected before seven active-play minutes", "Interrupted")
+      : null;
+    const rows = interruptedRow ? [...gameLog, interruptedRow] : [...gameLog];
+    const success = downloadCSV(rows, `Tetris_Log_${csvDateStamp()}_ALL_IDS.csv`);
+    if (success) {
+      if (interruptedRow) appendEvent(interruptedRow);
+      for (const id of new Set(rows.map((row) => row.id))) exportedCounts[id] = idRows(id).length;
+      resetSession();
+      showConfirmation("CSV download initiated and game reset",
+        `The PID, board and trial timer are cleared. Saved logs were retained in this browser.\n\nVerify that the CSV file was saved before the next participant.`);
+    } else {
+      resetDataSummary.textContent = "Download could not be initiated. The game has NOT been reset; please retry or choose Reset without download.";
+    }
+    resetInProgress = false;
+    resetConfirmButton.disabled = false;
+    resetExportAllButton.disabled = false;
+    updateLogControls();
+    return success;
+  }
+
+  function confirmResetGame() {
     if (resetInProgress || !resetDialog.open) return;
     resetInProgress = true;
     resetConfirmButton.disabled = true;
     resetExportAllButton.disabled = true;
-    const deletedSummary = trialBreakdown(gameLog);
-    resetDialog.close();
-    try {
-      // Drain all earlier writes before clearing so an old event cannot
-      // repopulate storage after the user confirms deletion.
-      await saveQueue;
-      if (storageMode === "indexeddb") {
-        await new Promise((resolve, reject) => {
-          const tx = database.transaction(["rows", "meta"], "readwrite");
-          tx.oncomplete = resolve;
-          tx.onerror = () => reject(tx.error);
-          tx.onabort = () => reject(tx.error);
-          tx.objectStore("rows").clear();
-          tx.objectStore("meta").put({ key: "session", activeId: "", exportedCounts: {}, savedAt: Date.now() });
-        });
-      }
-      // Prevent a stale fallback from resurrecting deleted rows on reload.
-      // localStorage is the primary store when IndexedDB is unavailable.
-      localStorage.removeItem(FALLBACK_KEY);
-      gameLog.length = 0;
-      activeId = "";
-      exportedCounts = {};
-      playerIdInput.value = "";
-      resumeAfterDialog = false;
-      prepareGame();
-      updateLogControls();
-      document.getElementById("data-management").open = false;
-      showConfirmation("Game reset", `Deleted saved trials:\n${deletedSummary}\n\nThe board and player ID have been cleared.`);
-    } catch (error) {
-      console.error("Unable to complete reset:", error);
-      setFeedback("Reset failed. Saved logs could not be safely cleared. Please retry.");
-      // The reset was not completed; returning to an active tab restores the game.
-    } finally {
-      resetInProgress = false;
-      resetConfirmButton.disabled = false;
-      resetExportAllButton.disabled = false;
-      updateLogControls();
-      restoreAfterDialog();
+    if (trialIsRunning() && gameNumber) {
+      logEvent("trial_interrupted", "Reset without download selected before seven active-play minutes", "Interrupted");
     }
+    resetSession();
+    resetInProgress = false;
+    resetConfirmButton.disabled = false;
+    resetExportAllButton.disabled = false;
+    updateLogControls();
+    showConfirmation("Game reset", "Player ID, board and active-play timer cleared.\nAll saved trial logs were retained in this browser.");
   }
 
-  resetConfirmButton.addEventListener("click", confirmFullReset);
-  resetExportAllButton.addEventListener("click", exportAllLogs);
+  resetConfirmButton.addEventListener("click", confirmResetGame);
+  resetExportAllButton.addEventListener("click", exportAllLogsAndReset);
   document.querySelector("#reset-cancel").addEventListener("click", () => resetDialog.close());
   resetDialog.addEventListener("cancel", (event) => {
     if (resetInProgress) event.preventDefault();
@@ -1029,6 +1210,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("keyup", (event) => stopKeyRepeat(event.code));
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) pauseGame("tab_hidden");
+    // Returning to the tab does not resume automatically.
   });
   window.addEventListener("blur", () => pauseGame("window_inactive"));
   startButton.addEventListener("click", toggleStartPause);
