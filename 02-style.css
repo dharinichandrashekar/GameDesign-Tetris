@@ -490,3 +490,12 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 #time { font-variant-numeric: tabular-nums; }
 .status[data-state="over"] { background: #ff4d4d; color: white; }
 .status[data-state="paused"] { background: #ffe693; }
+
+
+/* Brief automatic Game Over transition overlay. */
+.game-shell { position: relative; }
+.game-over-overlay { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; background: rgba(8, 10, 22, .78); border-radius: inherit; }
+.game-over-overlay[hidden] { display: none; }
+.game-over-card { width: min(88%, 360px); padding: 24px; text-align: center; color: #171717; background: #fff; border: 3px solid #161827; box-shadow: 0 8px 28px #0008; }
+.game-over-card h2 { margin: 0 0 8px; color: #b42332; }
+.game-over-card p { margin: 0; font-size: 14px; }

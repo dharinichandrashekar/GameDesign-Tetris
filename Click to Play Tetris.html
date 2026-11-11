@@ -20,7 +20,7 @@
       <div class="stat"><span class="stat-label">Lines</span><span class="stat-value" id="lines">0</span></div>
       <div class="stat"><span class="stat-label">Level</span><span class="stat-value" id="level">1</span></div>
       <div class="stat"><span class="stat-label">Pieces</span><span class="stat-value" id="pieces">0</span></div>
-      <div class="stat"><span class="stat-label">Active play (07:00 max)</span><span class="stat-value" id="time">00:00</span></div>
+      <div class="stat"><span class="stat-label">Active play (03:00 max)</span><span class="stat-value" id="time">00:00</span></div>
     </section>
 
     <!-- Layer 2: ID/export (left), gameplay controls (right) -->
@@ -32,7 +32,7 @@
                  maxlength="50" autocomplete="off" spellcheck="false"
                  aria-describedby="export-feedback storage-notice">
           <button type="button" id="switch-id-button" title="Change player without deleting saved trials" disabled>Switch ID</button>
-          <button type="button" id="export-button" aria-label="Export current player 12-column research CSV" disabled>Export CSV</button>
+          <button type="button" id="export-button" aria-label="Export current player research CSV" disabled>Export CSV</button>
         </div>
       </div>
       <div class="control-card action-card">
@@ -64,7 +64,7 @@
           <summary id="log-summary">Saved trials: 0</summary>
           <div class="data-details">
             <span id="storage-notice">Checking saved logs…</span>
-            <span>Reset clears the player ID, board and 7-minute timer. Previously saved logs are retained.</span>
+            <span>Reset deletes all saved browser records and export metadata for the current PID.</span>
           </div>
         </details>
 
@@ -79,16 +79,19 @@
             <li><kbd>C</kbd> or <kbd>Shift</kbd> Hold piece</li>
             <li><kbd>P</kbd> or <kbd>Esc</kbd> Pause / resume</li>
           </ul>
-          <p><strong>Trial:</strong> 7 minutes from Start Game. If Game over occurs, your timer pauses. Click New game to resume the remaining active-play time. Your player ID and progress on the trial clock are retained.</p>
-          <p>Manual pause, Game over, switching tabs/windows, and dialogs all <strong>pause the 7-minute active-play timer</strong>. After returning to this tab, click Resume. The trial automatically ends after 07:00 of active gameplay; export the CSV when it finishes.</p>
+          <p><strong>Trial:</strong> 3 minutes of accumulated active gameplay from Start Game. Game Over is shown for 2 seconds, then a new game starts automatically with the same player ID and trial clock.</p>
+          <p>The 2-second Game Over transition is excluded from active-play time. The trial ends after 03:00 of accumulated active gameplay.</p>
         </details>
       </aside>
     </main>
+    <div id="game-over-overlay" class="game-over-overlay" hidden role="status" aria-live="assertive">
+      <div class="game-over-card"><h2>Game Over</h2><p>Starting a new game…</p></div>
+    </div>
   </div>
 
   <dialog id="reset-dialog" class="action-dialog" aria-labelledby="reset-title" aria-describedby="reset-description">
     <h2 id="reset-title">Reset the current game and participant?</h2>
-    <p id="reset-description">This resets the player ID, board, and active-play timer. An unfinished trial is marked interrupted. Previously saved logs remain in this browser. The download option initiates a CSV download, then immediately resets; browsers cannot confirm that a file finished saving.</p>
+    <p id="reset-description">This deletes all saved browser records and export metadata for the current PID, then resets the player ID, board and active-play timer. Download all CSV first exports retained records before deleting the current PID. Browsers cannot confirm that a file finished saving.</p>
     <p class="dialog-data-label">Saved trial logs that will be retained:</p>
     <p id="reset-data-summary" class="dialog-data-summary">No saved trials</p>
     <div class="dialog-choices">
@@ -100,7 +103,7 @@
 
   <dialog id="switch-dialog" class="action-dialog" aria-labelledby="switch-title" aria-describedby="switch-description">
     <h2 id="switch-title">Switch player ID?</h2>
-    <p id="switch-description">If a trial is running, it will end early. A new player starts a fresh 7-minute trial. All saved logs are preserved.</p>
+    <p id="switch-description">If a trial is running, it will end early. A new player starts a fresh 3-minute trial. All saved logs are preserved.</p>
     <p id="switch-data-summary" class="dialog-data-summary"></p>
     <div class="dialog-choices">
       <button type="button" id="switch-confirm" class="action-primary">Switch player ID</button>
